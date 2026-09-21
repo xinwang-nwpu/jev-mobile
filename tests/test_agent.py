@@ -64,6 +64,18 @@ class TestBasicLoop:
         agent.close()
         assert agent.state["status"] == "blocked"
 
+    def test_trace_records_usage_totals(self, monkeypatch):
+        device = FakeDevice([simple_tree()])
+        install_script(monkeypatch, [("CLICK", "1"), ("DONE", None)])
+        agent = Agent("finish the flow", device=device)
+        for _ in agent.run():
+            pass
+        agent.close()
+        usage = agent.trace()["usage"]
+        assert usage["decision"]["requests"] == 2
+        assert usage["text"]["requests"] == 0
+        assert usage["total"]["input_tokens"] == 0  # fake decisions carry no usage
+
 
 class TestTyping:
     def test_type_text_calls_helper_and_executes_fill(self, monkeypatch):
@@ -213,3 +225,19 @@ class TestConstruction:
         device = FakeDevice([simple_tree()])
         Agent("open something", device=device, start_package="com.example.app")
         assert device.acts[0] == ({"id": "launch", "kind": "launch"}, "com.example.app")
+
+    def test_record_without_screenshots_keeps_trace_only(self, monkeypatch, tmp_path):
+        device = FakeDevice([simple_tree()])
+        install_script(monkeypatch, [("CLICK", "1"), ("DONE", None)])
+        agent = Agent("finish", device=device, record_dir=str(tmp_path / "run"), screenshots=False)
+        for _ in agent.run():
+            pass
+        agent.close()
+        assert agent.record is True and agent.screenshots is False
+        assert not (tmp_path / "run" / "000000.jpg").exists()
+
+    def test_recording_default_still_implies_screenshots(self):
+        device = FakeDevice([simple_tree()])
+        agent = Agent("finish", device=device, record_dir=None, screenshots=None)
+        agent.close()
+        assert agent.screenshots is False  # nothing recorded without a record dir

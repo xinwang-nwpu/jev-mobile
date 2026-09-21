@@ -7,6 +7,7 @@ from jev_mobile.__main__ import (
     format_probability_list,
     format_step,
     format_summary,
+    format_tokens,
     task_run_dir,
 )
 
@@ -37,7 +38,7 @@ def base_state():
             {"latency_ms": 700, "usage": {"input_tokens": 400, "output_tokens": 30}},
             {"latency_ms": 900, "usage": {"input_tokens": 500, "output_tokens": 40}},
         ],
-        "text_calls": [{"latency_ms": 2000}],
+        "text_calls": [{"latency_ms": 2000, "usage": {"prompt_tokens": 50, "completion_tokens": 10}}],
         "page": {"app": "tv.danmaku.bili", "activity": "com.bilibili.ship.Player", "text": "在百万豪装录音棚听陶喆《流沙》\n第二行"},
     }
 
@@ -105,10 +106,25 @@ def test_quiet_line_matches_old_format():
     assert line == "[   4.1s] CLICK [14] 哔哩哔哩 changed=True"
 
 
-def test_summary_includes_tokens_and_latency():
+def test_summary_reports_latency_and_text_calls():
     summary = format_summary(base_state(), quiet=False)
-    assert "决策均值 800ms" in summary and "in≈900" in summary and "out≈70" in summary
-    assert "文本生成 1 次均值 2000ms" in summary
+    assert "决策均值 800ms" in summary and "文本生成 1 次均值 2000ms" in summary
+    assert "tokens" not in summary  # tokens moved to their own always-printed line
+
+
+def test_tokens_line_aggregates_both_providers():
+    line = format_tokens(base_state())
+    # Decision usage uses input/output_tokens; the text helper reports prompt/completion.
+    assert "决策 in≈900 out≈70" in line
+    assert "文本 in≈50 out≈10" in line
+    assert "合计 in≈950 out≈80" in line
+
+
+def test_tokens_line_without_text_calls():
+    state = base_state()
+    state["text_calls"] = []
+    line = format_tokens(state)
+    assert "文本" not in line and "合计 in≈900 out≈70" in line
 
 
 def test_hidden_events_have_lines():

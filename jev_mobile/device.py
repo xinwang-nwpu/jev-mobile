@@ -11,6 +11,7 @@ import os
 import re
 import subprocess
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional, Tuple
 
 from .a11y import (
@@ -55,6 +56,15 @@ class StalePage(ValueError):
     """A decision no longer refers to the observed screen."""
 
 
+def _extract_xml(output: str) -> str:
+    """The XML inside a uiautomator dump stream; empty when the dump produced none."""
+    for marker in ("<?xml", "<hierarchy"):
+        index = output.find(marker)
+        if index >= 0:
+            return output[index:]
+    return ""
+
+
 class Device:
     def __init__(self, adb_path: Optional[str] = None, device: Optional[str] = None):
         self.adb_path = adb_path or os.environ.get("ADB_PATH", "adb")
@@ -95,13 +105,19 @@ class Device:
     # -- observation ------------------------------------------------------
 
     def observe(self, screenshot: bool = False) -> Dict[str, Any]:
-        elements, phone_state, source = self._read_tree()
-        app, activity = self._focus_app_activity()
+        # Tree, focus, and screenshot are independent reads; run them concurrently so
+        # one observation costs the slowest read, not the sum of all three.
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            tree_future = pool.submit(self._read_tree)
+            focus_future = pool.submit(self._focus_app_activity)
+            shot_future = pool.submit(self._screencap_bytes) if screenshot else None
+            elements, phone_state, source = tree_future.result()
+            app, activity = focus_future.result()
         state = snapshot_state(elements, {"app": app, "activity": activity}, source, self.screen)
         if source != "uiautomator":
             state["keyboard_visible"] = bool(phone_state.get("keyboardVisible"))
         if screenshot:
-            state["screenshot"] = base64.b64encode(self._screencap_bytes()).decode("ascii")
+            state["screenshot"] = base64.b64encode(shot_future.result()).decode("ascii")
         self.last_source = source
         return state
 
@@ -125,17 +141,19 @@ class Device:
             if usable:
                 return portal
         last_error = ""
-        for attempt in range(3):
-            remote = "/sdcard/jev_mobile_dump_%d.xml" % int(time.time() * 1000)
-            dump = self._run("shell", "uiautomator", "dump", remote)
-            if dump.returncode != 0:
-                last_error = (dump.stderr or dump.stdout or "").strip()
-                time.sleep(0.5)
-                continue
-            cat = self._run("shell", "cat", remote)
-            self._run("shell", "rm", remote)
-            if cat.returncode == 0 and cat.stdout and cat.stdout.strip().startswith("<"):
-                return parse_uiautomator_xml(cat.stdout), {}, "uiautomator"
+        for _ in range(3):
+            # /dev/tty streams the XML back on stdout: one round trip instead of dump+cat+rm.
+            xml = _extract_xml(self._shell("uiautomator dump /dev/tty").stdout or "")
+            if xml:
+                return parse_uiautomator_xml(xml), {}, "uiautomator"
+            # Some builds refuse to dump to a character device; try a file, still in one round trip.
+            remote = "/sdcard/jev_mobile_dump_%d.xml" % os.getpid()
+            combined = self._shell(
+                "uiautomator dump %s >/dev/null 2>&1; cat %s 2>/dev/null; rm -f %s" % (remote, remote, remote)
+            )
+            xml = _extract_xml(combined.stdout or "")
+            if xml:
+                return parse_uiautomator_xml(xml), {}, "uiautomator"
             last_error = "empty uiautomator dump"
             time.sleep(0.5)
         raise RuntimeError("Could not read the A11Y tree: %s" % last_error)
@@ -171,7 +189,8 @@ class Device:
         return None
 
     def _focus_app_activity(self) -> Tuple[str, str]:
-        res = self._shell("dumpsys window")
+        # The full dumpsys window output is hundreds of KB over the wire; grep on the device.
+        res = self._shell("dumpsys window | grep -m1 mCurrentFocus")
         match = re.search(r"mCurrentFocus=Window\{[^}]*\s(\S+)/(\S+?)(?:\s|\})", res.stdout or "")
         if not match:
             return "", ""

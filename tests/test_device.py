@@ -15,6 +15,8 @@ UIA_XML = (
     "<node bounds='[0,0][100,100]' class='android.widget.TextView' text='Go' clickable='true'/>"
     "</hierarchy>"
 )
+# What `uiautomator dump /dev/tty` prints: a status line, then the XML itself.
+TTY_DUMP = "UI hierchary dumped to: /dev/tty.\n" + UIA_XML
 
 
 def bare_device(monkeypatch, portal_result):
@@ -52,17 +54,31 @@ def test_flagless_tree_detected():
 
 def test_flagless_portal_falls_back_to_uiautomator(monkeypatch):
     device = bare_device(monkeypatch, (FLAGLESS_PORTAL, {}, "mobilerun_portal"))
-    run, calls = fake_run(["", UIA_XML, ""])
+    run, calls = fake_run([TTY_DUMP])
     monkeypatch.setattr(device, "_run", run)
     elements, phone_state, source = device._read_tree()
     assert source == "uiautomator"
     assert elements[0]["text"] == "Go"
+    # The dump streams the XML back over /dev/tty: one round trip, no cat/rm follow-ups.
+    assert len(calls) == 1
+    assert " ".join(str(a) for a in calls[0]).endswith("uiautomator dump /dev/tty")
     # The capability decision is cached: a second read skips the portal query entirely.
     monkeypatch.setattr(device, "_portal_tree", lambda: (_ for _ in ()).throw(AssertionError("portal re-queried")))
-    run2, _ = fake_run(["", UIA_XML, ""])
+    run2, _ = fake_run([TTY_DUMP])
     monkeypatch.setattr(device, "_run", run2)
     _, _, source = device._read_tree()
     assert source == "uiautomator"
+
+
+def test_uiautomator_file_fallback_when_dev_tty_refuses(monkeypatch):
+    device = bare_device(monkeypatch, (FLAGLESS_PORTAL, {}, "mobilerun_portal"))
+    run, calls = fake_run(["ERROR: could not get idle state.", UIA_XML])
+    monkeypatch.setattr(device, "_run", run)
+    _, _, source = device._read_tree()
+    assert source == "uiautomator"
+    # The fallback dumps to a file and returns it in a single combined shell command.
+    fallback = " ".join(str(a) for a in calls[1])
+    assert "cat" in fallback and "rm -f" in fallback
 
 
 def test_flagged_portal_is_used_without_uiautomator(monkeypatch):

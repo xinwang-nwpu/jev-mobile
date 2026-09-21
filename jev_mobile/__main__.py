@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 from typing import Dict, List
 
-from .agent import Agent
+from .agent import Agent, usage_totals
 from .config import load_config
 
 
@@ -99,13 +99,21 @@ def format_summary(state: Dict, quiet: bool) -> str:
     )
     if not quiet and decisions:
         latencies = [d["latency_ms"] for d in decisions]
-        tokens_in = sum(d.get("usage", {}).get("input_tokens", 0) or 0 for d in decisions)
-        tokens_out = sum(d.get("usage", {}).get("output_tokens", 0) or 0 for d in decisions)
-        line += "  决策均值 %dms  tokens in≈%d out≈%d" % (sum(latencies) // len(latencies), tokens_in, tokens_out)
+        line += "  决策均值 %dms" % (sum(latencies) // len(latencies))
         text_calls = state["text_calls"]
         if text_calls:
             text_ms = sum(t["latency_ms"] for t in text_calls)
             line += "  文本生成 %d 次均值 %dms" % (len(text_calls), text_ms // len(text_calls))
+    return line
+
+
+def format_tokens(state: Dict) -> str:
+    usage = usage_totals(state)
+    decision, text, total = usage["decision"], usage["text"], usage["total"]
+    line = "tokens 决策 in≈%d out≈%d" % (decision["input_tokens"], decision["output_tokens"])
+    if text["requests"]:
+        line += " · 文本 in≈%d out≈%d" % (text["input_tokens"], text["output_tokens"])
+    line += " · 合计 in≈%d out≈%d" % (total["input_tokens"], total["output_tokens"])
     return line
 
 
@@ -134,6 +142,11 @@ def main(argv=None) -> int:
     parser.add_argument("--record-dir", default=None, help="Save screenshots and trace.json here.")
     parser.add_argument("--screenshots", action="store_true", help="Observe with screenshots (implied by --record-dir).")
     parser.add_argument(
+        "--no-screenshots",
+        action="store_true",
+        help="Skip screenshots even when recording; each screencap costs ~1s per step.",
+    )
+    parser.add_argument(
         "--action-interval",
         type=float,
         default=None,
@@ -159,13 +172,19 @@ def main(argv=None) -> int:
     record_dir = args.record_dir or config["record_dir"] or task_run_dir(task)
     interval = args.action_interval if args.action_interval is not None else config["action_interval"]
     quiet = args.quiet or config["quiet"]
+    if args.no_screenshots:
+        screenshots = False
+    elif args.screenshots or config["screenshots"]:
+        screenshots = True
+    else:
+        screenshots = None  # recording decides
     agent = Agent(
         task,
         adb_path=args.adb_path or config["adb_path"] or None,
         serial=args.device or config["device"],
         start_package=args.start_package or config["start_package"],
         record_dir=record_dir,
-        screenshots=args.screenshots or config["screenshots"],
+        screenshots=screenshots,
         action_interval=interval,
     )
     last_step = 0
@@ -194,6 +213,7 @@ def main(argv=None) -> int:
                 json.dump(agent.trace(), f, ensure_ascii=False, indent=2)
     state = agent.state
     print(format_summary(state, quiet))
+    print(format_tokens(state))
     if not quiet:
         print(final_page_line(state))
     return 0 if status == "done" else 1

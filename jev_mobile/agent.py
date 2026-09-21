@@ -24,6 +24,25 @@ def _observed(decision: Dict[str, Any]) -> Dict[str, Any]:
     return {"page": page, "elements": state.get("elements", [])}
 
 
+def usage_totals(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Aggregate token usage over a run, tolerating both key styles seen from providers:
+    TypeSafe (input/output_tokens) and OpenAI-compatible text helpers (prompt/completion)."""
+    decisions = state.get("decisions", [])
+    text_calls = state.get("text_calls", [])
+    decision_in = sum((d.get("usage") or {}).get("input_tokens", 0) or 0 for d in decisions)
+    decision_out = sum((d.get("usage") or {}).get("output_tokens", 0) or 0 for d in decisions)
+    text_in = text_out = 0
+    for call in text_calls:
+        usage = call.get("usage") or {}
+        text_in += usage.get("input_tokens", usage.get("prompt_tokens", 0)) or 0
+        text_out += usage.get("output_tokens", usage.get("completion_tokens", 0)) or 0
+    return {
+        "decision": {"requests": len(decisions), "input_tokens": decision_in, "output_tokens": decision_out},
+        "text": {"requests": len(text_calls), "input_tokens": text_in, "output_tokens": text_out},
+        "total": {"input_tokens": decision_in + text_in, "output_tokens": decision_out + text_out},
+    }
+
+
 class Agent:
     def __init__(
         self,
@@ -34,7 +53,7 @@ class Agent:
         serial: Optional[str] = None,
         start_package: Optional[str] = None,
         record_dir: Optional[str] = None,
-        screenshots: bool = False,
+        screenshots: Optional[bool] = None,
         action_interval: float = 0.0,
     ):
         task = task.strip() if isinstance(task, str) else ""
@@ -46,7 +65,8 @@ class Agent:
         self.device = device or Device(adb_path, serial)
         self.record_dir = Path(record_dir) if record_dir else None
         self.record = bool(self.record_dir)
-        self.screenshots = screenshots or bool(self.record_dir)
+        # None = recording implies screenshots; an explicit value always wins.
+        self.screenshots = bool(self.record_dir) if screenshots is None else bool(screenshots)
         try:
             if start_package:
                 self.device.launch(start_package)
@@ -68,7 +88,8 @@ class Agent:
         )
         if self.record_dir:
             self.record_dir.mkdir(parents=True, exist_ok=True)
-            (self.record_dir / "000000.jpg").write_bytes(base64.b64decode(page["screenshot"]))
+            if "screenshot" in page:
+                (self.record_dir / "000000.jpg").write_bytes(base64.b64decode(page["screenshot"]))
 
     # -- public view ------------------------------------------------------
 
@@ -85,6 +106,7 @@ class Agent:
             "goal": state["goal"],
             "status": state["status"],
             "elapsed_ms": state["elapsed_ms"],
+            "usage": usage_totals(state),
             "history": state["history"],
             "text_calls": state["text_calls"],
             "final_page": {k: state["page"].get(k) for k in ("app", "activity", "source", "screen")},

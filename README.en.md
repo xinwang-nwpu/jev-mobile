@@ -40,8 +40,8 @@ Target questions are speculative: if the operation is `CLICK`, only `click_targe
 
 - **One model request per step.** The operation head and every target head share the same observed state and are evaluated in parallel within a single request.
 - **No screenshots in the default loop.** Jev consumes structured state: className, text, contentDescription, resourceId, bounds, checked/selected, and related semantic properties.
-- **One A11Y read covers the whole state.** Prefer the Portal content provider (`com.mobilerun.portal` / `com.droidrun.portal`): a single `content query` returns the full tree plus phone state; fall back to a `uiautomator dump` when absent.
-- **Cheap freshness guards.** Before predicting, compare the `dumpsys window` focus; before accepting DONE/BLOCKED, run one full semantic-fingerprint comparison so the agent never declares success on a stale screen.
+- **One A11Y read covers the whole state, and three reads run in parallel.** Prefer the Portal content provider (`com.mobilerun.portal` / `com.droidrun.portal`): a single `content query` returns the full tree plus phone state; fall back to `uiautomator dump /dev/tty` (one round trip streams the XML back) when absent. Tree, focused window, and screenshot are fetched concurrently, so one observation costs the slowest read, not the sum.
+- **Cheap freshness guards.** Before predicting, compare the `dumpsys window` focus (grepped on the device; one line comes back); before accepting DONE/BLOCKED, run one full semantic-fingerprint comparison so the agent never declares success on a stale screen.
 - **Text is generated only when needed and optimized on the path.** Clearing a field happens in one device-side shell (`MOVE_END` + repeated `DEL`); non-ASCII text goes through an ADB Keyboard broadcast; the IME is switched once on first input and restored on close.
 - **Semantic fingerprints, not screenshot diffs.** A hash over "activity + visible text + action signatures"; three consecutive steps with no semantic change and no WAIT means stuck — the run stops instead of burning budget.
 
@@ -106,11 +106,12 @@ Typical output (console labels are Chinese):
 [   0.8s] 决策  CLICK 0.62 | DONE 0.15 | SCROLL_DOWN 0.11 | +6  conf=0.62  512ms  目标: [12] 0.93 [3] 0.04
 [   1.3s] CLICK [12] 飞行模式 changed=True → Settings
 ...
-status=done steps=2 decisions=8 elapsed=31.7s  决策均值 540ms  tokens in≈8600 out≈420
+status=done steps=2 decisions=8 elapsed=31.7s  决策均值 540ms
+tokens 决策 in≈8600 out≈420 · 合计 in≈8600 out≈420
 final: com.android.settings / Settings · "设置"
 ```
 
-Per-step records default to `runs/<task-name>/`: `trace.json` (per-step observations, decision probabilities, executed actions) plus screenshots (`--record-dir` turns screenshots on automatically). Exit code 0 means status=done.
+Per-step records default to `runs/<task-name>/`: `trace.json` (per-step observations, decision probabilities, executed actions, and a token-usage summary) plus screenshots (`--record-dir` turns screenshots on automatically). Exit code 0 means status=done.
 
 One-liner without a config file (all flags [below](#cli-flags)):
 
@@ -120,7 +121,7 @@ python -m jev_mobile --task "Open Settings and turn on Airplane Mode" --start-pa
 
 ### Optional accelerators
 
-- Droidrun / Mobilerun Portal on the device — drops an A11Y read from ~1s to ~100ms (without it the loop falls back to `uiautomator dump`: same behavior, just slower);
+- Droidrun / Mobilerun Portal on the device — the main A11Y-read accelerator (measured roughly 1s → the 100ms–1s range, depending on device and Portal version); without it the loop falls back to `uiautomator dump` (several seconds per dump on some devices; keeps the feature working, barely);
 - [ADB Keyboard](https://github.com/senzhk/ADBKeyBoard) on the device — enables non-ASCII input; without it only ASCII can be typed.
 
 ### Troubleshooting
@@ -129,7 +130,8 @@ python -m jev_mobile --task "Open Settings and turn on Airplane Mode" --start-pa
 | --- | --- |
 | `adb devices` shows `unauthorized` | Accept the debugging prompt on the phone; or revoke USB debugging authorizations and replug |
 | `TYPESAFE_API_KEY is missing` | `.env` not created or key unfilled; make sure it sits in the working directory |
-| ~1s stall before each observation | The uiautomator fallback is slow; install Portal on the device |
+| ~1s stall before each observation | No Portal installed, so the slow uiautomator fallback is used; install Portal on the device |
+| Portal installed but still ~1s per step | That is the per-step screenshot; pass `--no-screenshots` to keep only `trace.json` |
 | Chinese text won't type | Install ADB Keyboard (see above) |
 
 ## Use
@@ -149,6 +151,7 @@ python -m jev_mobile --task "Open Settings and turn on Airplane Mode" --record-d
 | `--adb-path` / `--device` | Override `ADB_PATH` / `ANDROID_DEVICE` |
 | `--record-dir` | Save per-step screenshots and `trace.json`; defaults to `runs/<task-name>/` |
 | `--screenshots` | Observe with screenshots (implied by `--record-dir`) |
+| `--no-screenshots` | Skip screenshots even when recording, keep only `trace.json` (~1s per step saved) |
 | `--action-interval` | Extra seconds to wait after each executed action, default 0 (env: `ACTION_INTERVAL`) |
 
 ### Library
@@ -203,7 +206,7 @@ python scripts/jev_probe.py --demo                                          # al
 - **No per-element freshness check before a tap.** Re-reading the whole A11Y tree over ADB is not cheap, so execution uses the observed coordinates and divergence is detected afterwards via the semantic fingerprint; window switches during a decision are caught by the focus guard.
 - **No SELECT operation.** Android dropdowns go through the click flow.
 - **Limits:** 60 actions, 120 decisions, 250 elements per run.
-- **The uiautomator path is slower** (~1s per dump); installing Portal speeds it up significantly.
+- **The uiautomator fallback is slow** (~1s per dump, several seconds on some devices); Portal is the main accelerator, but the Portal query's own latency (~100ms–1s depending on the device) sets the floor for each observation.
 - **DONE is not proof.** The model declaring DONE only means it saw visible evidence; whether the task truly succeeded still needs independent verification (e.g. checking the required final state).
 
 ## Development

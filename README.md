@@ -39,8 +39,8 @@ A11Y树 → 元素表 ────→ │ operation（选哪个操作）      �
 
 - **每步只发一次模型请求。** 操作头和所有目标头共享同一份观察状态，在同一次请求里并行求值。
 - **默认循环不截图。** Jev 消费结构化状态：className、text、contentDescription、resourceId、bounds、checked/selected 等语义属性。
-- **一次 A11Y 读取覆盖全部状态。** 优先读 Portal（`com.mobilerun.portal` / `com.droidrun.portal` 的 ContentProvider，一条 `content query` 拿到整棵树和手机状态），未安装时回退 `uiautomator dump`。
-- **廉价的新鲜度守卫。** 预测前比较 `dumpsys window` 焦点窗口是否变化；接受 DONE/BLOCKED 前做一次完整的语义指纹比对，防止在过期画面上宣布完成。
+- **一次 A11Y 读取覆盖全部状态，且三路并行。** 优先读 Portal（`com.mobilerun.portal` / `com.droidrun.portal` 的 ContentProvider，一条 `content query` 拿到整棵树和手机状态），未安装时回退 `uiautomator dump /dev/tty`（单次往返直接取回 XML）。树、焦点窗口、截图并发执行，一次观察只花最慢一路的时间。
+- **廉价的新鲜度守卫。** 预测前比较 `dumpsys window` 焦点窗口是否变化（设备端 grep，只传回一行）；接受 DONE/BLOCKED 前做一次完整的语义指纹比对，防止在过期画面上宣布完成。
 - **文本按需生成、按路径优化。** 输入框清空在设备端一条 shell 完成（`MOVE_END` + 循环 `DEL`）；中文等非 ASCII 文本走 ADB Keyboard 广播；IME 只在首次输入时切换、结束时恢复。
 - **语义指纹而非截图 diff。** 对"活动 + 可见文本 + 动作签名"做哈希；连续 3 步语义无变化且非 WAIT 即判定卡住并停止，不烧预算。
 
@@ -105,11 +105,12 @@ python -m jev_mobile
 [   0.8s] 决策  CLICK 0.62 | DONE 0.15 | SCROLL_DOWN 0.11 | +6  conf=0.62  512ms  目标: [12] 0.93 [3] 0.04
 [   1.3s] CLICK [12] 飞行模式 changed=True → Settings
 ...
-status=done steps=2 decisions=8 elapsed=31.7s  决策均值 540ms  tokens in≈8600 out≈420
+status=done steps=2 decisions=8 elapsed=31.7s  决策均值 540ms
+tokens 决策 in≈8600 out≈420 · 合计 in≈8600 out≈420
 final: com.android.settings / Settings · "设置"
 ```
 
-每步记录默认写入 `runs/<任务名>/`：`trace.json`（逐步观察、决策概率、执行动作）和逐步截图（`--record-dir` 会自动开启截图）。退出码 0 表示 status=done。
+每步记录默认写入 `runs/<任务名>/`：`trace.json`（逐步观察、决策概率、执行动作、token 汇总）和逐步截图（`--record-dir` 会自动开启截图）。退出码 0 表示 status=done。
 
 不想建配置文件时一行直接跑（其余参数见[下文](#命令行参数)）：
 
@@ -119,7 +120,7 @@ python -m jev_mobile --task "打开设置，把飞行模式开关打开" --start
 
 ### 可选加速件
 
-- 设备安装 Droidrun / Mobilerun Portal —— A11Y 读取从约 1s 降到约 100ms（未装时自动回退 `uiautomator dump`，功能不变、只是慢）；
+- 设备安装 Droidrun / Mobilerun Portal —— A11Y 读取的主要加速手段（实测约 1s → 100ms~1s 量级，取决于设备与 Portal 版本）；未装时自动回退 `uiautomator dump`（部分设备单次数秒，仅保功能可用）；
 - 设备安装 [ADB Keyboard](https://github.com/senzhk/ADBKeyBoard) —— 支持中文输入，未安装时只能输 ASCII。
 
 ### 常见问题
@@ -128,7 +129,8 @@ python -m jev_mobile --task "打开设置，把飞行模式开关打开" --start
 | --- | --- |
 | `adb devices` 显示 `unauthorized` | 在手机弹窗上允许调试；仍不行则在开发者选项里「撤销 USB 调试授权」后重插 |
 | 报 `TYPESAFE_API_KEY is missing` | `.env` 没创建或没填 Key，确认它在运行目录下 |
-| 每步观察前卡约 1s | uiautomator 回退路径较慢，设备安装 Portal 即可加速 |
+| 每步观察前卡约 1s | 未装 Portal 时走 uiautomator 回退路径（慢）；设备安装 Portal 即可加速 |
+| 已装 Portal，每步仍多约 1s | 这是逐帧截图；加 `--no-screenshots` 跳过截图、只留 `trace.json` |
 | 中文输不进去 | 设备安装 ADB Keyboard（见上） |
 
 ## 使用
@@ -148,6 +150,7 @@ python -m jev_mobile --task "打开设置，把飞行模式开关打开" --recor
 | `--adb-path` / `--device` | 覆盖 `ADB_PATH` / `ANDROID_DEVICE` |
 | `--record-dir` | 保存逐步截图与 `trace.json`；缺省自动按任务名存到 `runs/<任务名>/` |
 | `--screenshots` | 观察时附带截图（`--record-dir` 隐含开启） |
+| `--no-screenshots` | 录制时也跳过截图、只留 `trace.json`（每步截图约 1s，追求速度时开启） |
 | `--action-interval` | 每个动作执行后额外等待的秒数，默认 0（环境变量 `ACTION_INTERVAL`） |
 
 ### 库
@@ -202,7 +205,7 @@ python scripts/jev_probe.py --demo                                       # 一�
 - **点击前不做逐元素重校验。** ADB 重读整棵 A11Y 树代价不可忽略，因此执行使用观察到的坐标，事后用语义指纹检测分歧；决策期间的窗口切换由焦点守卫捕获。
 - **没有下拉选择（SELECT）操作。** Android 的下拉控件统一走点击流程。
 - **上限：** 动作 60 步、决策 120 次、元素 250 个。
-- **uiautomator 路径较慢**（每次 dump 约 1s）；装 Portal 可显著加速。
+- **uiautomator 回退路径慢**（单次 dump 约 1s，部分设备可达数秒）；装 Portal 是主要加速手段，但 Portal 查询自身的耗时（约 100ms~1s，因设备而异）构成每步观察耗时的下限。
 - **DONE 不是证明。** 模型宣布完成只代表它看到了可见证据；任务是否真正成功仍需独立验证（如检查任务要求的最终状态）。
 
 ## 开发
