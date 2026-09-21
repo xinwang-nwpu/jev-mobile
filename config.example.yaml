@@ -1,0 +1,27 @@
+# jev-mobile 运行配置。复制为 config.yaml 后直接 `python -m jev_mobile` 运行。
+# 命令行参数（如 --task）优先于此文件；API 密钥在 .env 里配置。
+
+# 任务目标（自然语言）
+task: "打开哔哩哔哩，播放流沙视频"
+
+# adb 可执行文件路径；留空则用 PATH 里的 adb（或 .env 的 ADB_PATH）
+adb_path: 'C:\platform-tools\adb.exe'
+
+# 设备序列号；只有一台设备时留空
+device: null
+
+# 起始 App 包名（等价于浏览器版的起始 URL）；null 表示从当前屏幕开始
+start_package: null
+
+# 运行记录目录：保存逐步截图与 trace.json
+# null = 自动按任务名建目录 runs/<任务名>/（同名任务重跑覆盖同一个文件夹）
+record_dir: null
+
+# 观察时是否附带截图（record_dir 非空时自动开启）
+screenshots: false
+
+# 每个动作执行后额外等待的秒数（默认 0；让页面动画/加载沉淀后再观察）
+action_interval: 0
+
+# 安静模式：每个动作只输出一行，不显示决策概率等细节（也可用 --quiet 临时开启）
+quiet: false

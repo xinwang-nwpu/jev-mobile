@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.env
+config.yaml
+runs/
+.venv/
+dist/
+.idea/
+.pytest_cache/
