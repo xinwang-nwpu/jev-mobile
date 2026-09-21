@@ -44,9 +44,11 @@ A11Y tree → table ──→│ operation (what to do)     │
 
 Target questions are speculative: if the operation is `CLICK`, only `click_target` can execute. Two decisions, **one network round trip**; each target head contains only elements compatible with that operation. Element indices are assigned by code (positions within the snapshot), and model output is always an already-observed index — never a selector, coordinate, or shell command, so there is no execution path for UI-text injection.
 
+**Termination is a separate question.** The same request also evaluates a noul question "is the goal already achieved?" in parallel: a true verdict (≥ 0.5) ends the task even while the operation head still wants to act — the antidote to "the video is clearly playing, yet the model keeps tapping unlabeled elements and refuses to stop." A false verdict sends the operation head's DONE back: one WAIT runs, then the goal is re-judged with fresh evidence; after two consecutive vetoes the third DONE is accepted, so the gate cannot loop forever. Termination no longer depends on DONE winning a softmax over a dozen operations.
+
 ## Why it moves
 
-- **One model request per step.** The operation head and every target head share the same observed state and are evaluated in parallel within a single request.
+- **One model request per step.** The operation head, every target head, and the independent goal-achieved judgment (noul) share the same observed state and are evaluated in parallel within a single request.
 - **No screenshots in the default loop.** Jev consumes structured state: className, text, contentDescription, resourceId, bounds, checked/selected, and related semantic properties.
 - **One A11Y read covers the whole state, and three reads run in parallel.** Prefer the Portal content provider (`com.mobilerun.portal` / `com.droidrun.portal`): a single `content query` returns the full tree plus phone state; fall back to `uiautomator dump /dev/tty` (one round trip streams the XML back) when absent. Tree, focused window, and screenshot are fetched concurrently, so one observation costs the slowest read, not the sum.
 - **Cheap freshness guards.** Before predicting, compare the `dumpsys window` focus (grepped on the device; one line comes back); before accepting DONE/BLOCKED, run one full semantic-fingerprint comparison so the agent never declares success on a stale screen.
@@ -111,7 +113,7 @@ python -m jev_mobile
 Typical output (console labels are Chinese):
 
 ```text
-[   0.8s] 决策  CLICK 0.62 | DONE 0.15 | SCROLL_DOWN 0.11 | +6  conf=0.62  512ms  目标: [12] 0.93 [3] 0.04
+[   0.8s] 决策  CLICK 0.62 | DONE 0.15 | SCROLL_DOWN 0.11 | +6  conf=0.62  512ms  目标: [12] 0.93 [3] 0.04  goal=0.02
 [   1.3s] CLICK [12] 飞行模式 changed=True → Settings
 ...
 status=done steps=2 decisions=8 elapsed=31.7s  决策均值 540ms
@@ -191,7 +193,7 @@ Loaded automatically from `.env`; CLI flags win:
 
 | File | Responsibility |
 | --- | --- |
-| `jev_mobile/agent.py` | The complete loop: predict → act → observe; DONE freshness check, budgets, stuck detection |
+| `jev_mobile/agent.py` | The complete loop: predict → act → observe; independent goal-gated termination, DONE freshness check, budgets, stuck detection |
 | `jev_mobile/a11y.py` | One snapshot → indexed action space (click/fill + fixed controls), visible text, semantic fingerprint |
 | `jev_mobile/device.py` | ADB connection, Portal/uiautomator tree reads, tap/swipe/keyboard input, IME management |
 | `jev_mobile/model.py` | TypeSafe dynamic operation/target heads + small-model text generation, answer validation |
@@ -215,7 +217,7 @@ python scripts/jev_probe.py --demo                                          # al
 - **No SELECT operation.** Android dropdowns go through the click flow.
 - **Limits:** 60 actions, 120 decisions, 250 elements per run.
 - **The uiautomator fallback is slow** (~1s per dump, several seconds on some devices); Portal is the main accelerator, but the Portal query's own latency (~100ms–1s depending on the device) sets the floor for each observation.
-- **DONE is not proof.** The model declaring DONE only means it saw visible evidence; whether the task truly succeeded still needs independent verification (e.g. checking the required final state).
+- **DONE is gated by the independent goal judgment.** The noul question "is the goal achieved?" decides termination: a true verdict ends the run (even if the operation head wanted to act); a false verdict sends DONE back to wait and re-judge (accepted after two consecutive vetoes). **DONE is still not proof**: the model declaring DONE only means it saw visible evidence; whether the task truly succeeded still needs independent verification (e.g. checking the required final state).
 
 ## Development
 

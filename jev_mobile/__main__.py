@@ -54,9 +54,16 @@ def format_event(event: Dict) -> str:
         if targets:
             ranked = sorted(targets.items(), key=lambda kv: -kv[1])[:3]
             line += "  目标: " + " ".join("[%s] %.2f" % (index, prob) for index, prob in ranked)
+        goal_probability = event.get("goal_probability")
+        if goal_probability is not None:
+            line += "  goal=%.2f" % goal_probability
         return line
     if kind == "stale_done":
         return "%s DONE 被拒绝：决策后屏幕已变化，重新观察" % elapsed
+    if kind == "done_vetoed":
+        return "%s DONE 被目标判定否决（未达成，等待后重判）goal=%.2f" % (elapsed, event.get("goal_probability") or 0.0)
+    if kind == "goal_done":
+        return "%s 目标判定已达成，结束（操作头仍想行动）goal=%.2f" % (elapsed, event.get("goal_probability") or 0.0)
     if kind == "stuck":
         return "%s 判定卡住：连续 3 步无变化 → blocked" % elapsed
     if kind == "reobserve":

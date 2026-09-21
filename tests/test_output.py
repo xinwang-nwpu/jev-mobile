@@ -131,3 +131,26 @@ def test_hidden_events_have_lines():
     assert "DONE 被拒绝" in format_event({"type": "stale_done", "elapsed_ms": 1000})
     assert "判定卡住" in format_event({"type": "stuck", "elapsed_ms": 1000})
     assert "焦点窗口变化" in format_event({"type": "reobserve", "elapsed_ms": 1000, "reason": "focus_changed"})
+
+
+def test_goal_gate_events_have_lines():
+    assert "goal=0.12" in format_event({"type": "done_vetoed", "elapsed_ms": 1000, "goal_probability": 0.12})
+    assert "goal=0.93" in format_event({"type": "goal_done", "elapsed_ms": 1000, "goal_probability": 0.93})
+
+
+def test_decision_line_appends_goal_probability():
+    line = format_event(
+        {
+            "type": "decision",
+            "elapsed_ms": 22600,
+            "operation": "CLICK",
+            "operation_probabilities": {"CLICK": 0.9, "DONE": 0.1},
+            "confidence": 0.9,
+            "latency_ms": 742,
+            "target": "2",
+            "target_probabilities": {"2": 0.88, "5": 0.12},
+            "target_confidence": 0.88,
+            "goal_probability": 0.82,
+        }
+    )
+    assert "goal=0.82" in line

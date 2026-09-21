@@ -100,6 +100,7 @@ class TestChoose:
                         "confidence": 0.3,
                         "probabilities": {name: 1.0 / len(type_ids) for name in type_ids},
                     },
+                    "goal_achieved": {"type": "noul", "noul": 0.9},
                 },
             }
 
@@ -109,10 +110,13 @@ class TestChoose:
         assert decision["operation"] == "CLICK"
         assert decision["target"] == "2"
         assert decision["choice"] == "tap-1"
+        assert decision["goal"] == {"satisfied": True, "probability": 0.9, "confidence": None}
         body = captured["body"]
         assert body["state"]["page"]["activity"] == "Main"
         assert body["state"]["elements"][0]["operations"]
-        assert set(body["questions"]) == {"operation", "click_target", "type_text_target"}
+        assert set(body["questions"]) == {"operation", "click_target", "type_text_target", "goal_achieved"}
+        gate = body["questions"]["goal_achieved"]
+        assert gate["type"] == "noul" and "goal" in gate["instructions"]
         criteria = body["questions"]["click_target"]["criteria"]["2"]
         assert criteria["element"].startswith("[2] Go")
 
@@ -137,6 +141,17 @@ class TestChoose:
         decision = model.choose(state, "goal", [])
         assert decision["operation"] == "BACK"
         assert decision["choice"] == "back"
+
+
+class TestValidateGoal:
+    def test_majority_accepts(self):
+        assert model.validate_goal({"noul": 0.6})["satisfied"] is True
+        assert model.validate_goal({"noul": 0.4})["satisfied"] is False
+
+    def test_unusable_answer_falls_back_to_operation_head(self):
+        assert model.validate_goal({})["satisfied"] is None
+        assert model.validate_goal({"noul": "yes"})["satisfied"] is None
+        assert model.validate_goal({"noul": 1.5})["satisfied"] is None
 
 
 class TestFieldText:

@@ -42,9 +42,11 @@ A11Y树 → 元素表 ────→ │ operation（选哪个操作）      �
 
 目标问题都是投机的：若操作是 `CLICK`，只有 `click_target` 会被执行。两个决策、**一次网络往返**；每个目标头只包含与该操作兼容的元素。元素索引由代码分配（快照内的位置），模型输出永远只是"已观察到的索引"——不会变成选择器、坐标或 shell 命令，也就不存在被 UI 文本注入操纵的执行路径。
 
+**完成判定独立成题。** 同一次请求里还并行求值一道 noul 题「当前目标是否已达成」：判定为真（≥ 0.5）即可结束任务，即使操作头还想继续行动——这正是"视频明明在播、模型却反复点击无标签元素死活不肯结束"的解药；判定否决时，操作头的 DONE 会被打回、执行一次 WAIT 后带新证据重判，连续两票否决后第三次 DONE 放行，不会反向死循环。任务终止不再依赖 DONE 在十来个操作里竞争。
+
 ## 为什么快
 
-- **每步只发一次模型请求。** 操作头和所有目标头共享同一份观察状态，在同一次请求里并行求值。
+- **每步只发一次模型请求。** 操作头、所有目标头和「目标是否已达成」的独立判定（noul）共享同一份观察状态，在同一次请求里并行求值。
 - **默认循环不截图。** Jev 消费结构化状态：className、text、contentDescription、resourceId、bounds、checked/selected 等语义属性。
 - **一次 A11Y 读取覆盖全部状态，且三路并行。** 优先读 Portal（`com.mobilerun.portal` / `com.droidrun.portal` 的 ContentProvider，一条 `content query` 拿到整棵树和手机状态），未安装时回退 `uiautomator dump /dev/tty`（单次往返直接取回 XML）。树、焦点窗口、截图并发执行，一次观察只花最慢一路的时间。
 - **廉价的新鲜度守卫。** 预测前比较 `dumpsys window` 焦点窗口是否变化（设备端 grep，只传回一行）；接受 DONE/BLOCKED 前做一次完整的语义指纹比对，防止在过期画面上宣布完成。
@@ -109,7 +111,7 @@ python -m jev_mobile
 正常输出形如：
 
 ```text
-[   0.8s] 决策  CLICK 0.62 | DONE 0.15 | SCROLL_DOWN 0.11 | +6  conf=0.62  512ms  目标: [12] 0.93 [3] 0.04
+[   0.8s] 决策  CLICK 0.62 | DONE 0.15 | SCROLL_DOWN 0.11 | +6  conf=0.62  512ms  目标: [12] 0.93 [3] 0.04  goal=0.02
 [   1.3s] CLICK [12] 飞行模式 changed=True → Settings
 ...
 status=done steps=2 decisions=8 elapsed=31.7s  决策均值 540ms
@@ -189,7 +191,7 @@ with Agent("打开设置，把飞行模式开关打开", start_package="com.andr
 
 | 文件 | 职责 |
 | --- | --- |
-| `jev_mobile/agent.py` | 完整循环：predict → act → observe；DONE 新鲜度校验、预算与卡住检测 |
+| `jev_mobile/agent.py` | 完整循环：predict → act → observe；独立目标判定把关终止、DONE 新鲜度校验、预算与卡住检测 |
 | `jev_mobile/a11y.py` | 一次快照 → 索引化动作空间（click/fill + 固定控件）、可见文本、语义指纹 |
 | `jev_mobile/device.py` | ADB 连接、Portal/uiautomator 树读取、tap/swipe/键盘输入、IME 管理 |
 | `jev_mobile/model.py` | TypeSafe 动态操作/目标头 + 小模型文本生成，选择结果校验 |
@@ -213,7 +215,7 @@ python scripts/jev_probe.py --demo                                       # 一�
 - **没有下拉选择（SELECT）操作。** Android 的下拉控件统一走点击流程。
 - **上限：** 动作 60 步、决策 120 次、元素 250 个。
 - **uiautomator 回退路径慢**（单次 dump 约 1s，部分设备可达数秒）；装 Portal 是主要加速手段，但 Portal 查询自身的耗时（约 100ms~1s，因设备而异）构成每步观察耗时的下限。
-- **DONE 不是证明。** 模型宣布完成只代表它看到了可见证据；任务是否真正成功仍需独立验证（如检查任务要求的最终状态）。
+- **DONE 由独立目标判定把关。** 同请求中的 noul 题「目标是否已达成」决定终止：判定为真即可结束（即便操作头仍想行动），判定否决会把 DONE 打回等待重判（连续两票后放行）。**DONE 依然不是证明**：模型宣布完成只代表它看到了可见证据，任务是否真正成功仍需独立验证（如检查任务要求的最终状态）。
 
 ## 开发
 

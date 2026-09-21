@@ -12,11 +12,15 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
-from .questions import NEXT_ACTION, TARGET, TEXT_VALUE
+from .questions import GOAL_ACHIEVED, NEXT_ACTION, TARGET, TEXT_VALUE
 
 # trust_env=False: system/registry proxies observed breaking the TLS handshake to this
 # endpoint; the API is reachable directly and credentials never need the proxy.
 CLIENT = httpx.Client(http2=True, timeout=25, trust_env=False)
+
+# The goal gate accepts "achieved" at simple majority; the strict GOAL_ACHIEVED wording
+# is what keeps premature acceptance rare.
+GOAL_THRESHOLD = 0.5
 
 
 def post_json(url, key, body):
@@ -50,6 +54,19 @@ def validate_choice(answer, ids):
     if not valid:
         raise ValueError("Invalid TypeSafe response; no action executed.")
     return answer
+
+
+def validate_goal(answer: Dict[str, Any]) -> Dict[str, Any]:
+    """Parse the noul goal-gate answer; satisfied is None when the answer is unusable,
+    which makes the agent fall back to the operation head's own DONE."""
+    value = answer.get("noul")
+    if isinstance(value, (int, float)) and 0.0 <= value <= 1.0:
+        return {
+            "satisfied": value >= GOAL_THRESHOLD,
+            "probability": round(float(value), 4),
+            "confidence": answer.get("confidence"),
+        }
+    return {"satisfied": None, "probability": None, "confidence": None}
 
 
 def action_space(actions):
@@ -99,7 +116,13 @@ def choose(state, goal, history):
             "type": "choice",
             "criteria": operations,
             "instructions": {"goal": goal, "rules": NEXT_ACTION},
-        }
+        },
+        # The goal gate rides in the same request: an independent noul judgment that
+        # decides termination instead of DONE competing in the operation choice.
+        "goal_achieved": {
+            "type": "noul",
+            "instructions": {"goal": goal, "rules": GOAL_ACHIEVED},
+        },
     }
     for operation, candidates in targets.items():
         questions[operation.lower() + "_target"] = {
@@ -150,6 +173,7 @@ def choose(state, goal, history):
         "operation_probabilities": operation_answer["probabilities"],
         "target_probabilities": target_answer["probabilities"] if target_answer else {},
         "target_confidence": target_answer["confidence"] if target_answer else None,
+        "goal": validate_goal(result["answers"].get("goal_achieved", {})),
         "raw_answers": result["answers"],
         "model": result["model"],
         "usage": result.get("usage", {}),

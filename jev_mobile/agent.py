@@ -15,6 +15,10 @@ from .device import Device, StalePage
 from .model import action_space, choose, field_context, field_text
 from .questions import MAX_STEPS
 
+# A DONE the goal gate vetoes twice in a row is accepted on the third vote: the
+# operation head insisting repeatedly outranks a gate that cannot see the evidence.
+MAX_DONE_VETOES = 2
+
 
 def _observed(decision: Dict[str, Any]) -> Dict[str, Any]:
     """The state the model actually saw, kept in the trace for debugging."""
@@ -85,6 +89,7 @@ class Agent:
             events=[],
             elapsed_ms=0,
             started_at=None,
+            done_vetoes=0,
         )
         if self.record_dir:
             self.record_dir.mkdir(parents=True, exist_ok=True)
@@ -114,6 +119,7 @@ class Agent:
             "decisions": [
                 {
                     **{k: d[k] for k in ("operation", "target", "confidence", "target_confidence", "latency_ms")},
+                    "goal": d.get("goal"),
                     "observed": _observed(d),
                 }
                 for d in state["decisions"]
@@ -147,6 +153,8 @@ class Agent:
         if len(state["decisions"]) >= MAX_STEPS * 2:
             raise ValueError("Reached the model-call budget")
         state["decision"] = choose(state["page"], state["goal"], state["history"])
+        if state["decision"]["operation"] != "DONE":
+            state["done_vetoes"] = 0
         state["decisions"].append(
             {**state["decision"], "fingerprint": state["page"]["fingerprint"], "elapsed_ms": self._elapsed()}
         )
@@ -161,9 +169,73 @@ class Agent:
                 "target": state["decision"]["target"],
                 "target_probabilities": state["decision"]["target_probabilities"],
                 "target_confidence": state["decision"]["target_confidence"],
+                "goal_probability": state["decision"]["goal"]["probability"],
             }
         )
         state["status"] = "predicted"
+
+    def _accept_stop(self, status: str) -> Dict[str, Any]:
+        """Accept DONE/BLOCKED only on a fresh screen; a changed page forces a re-decision."""
+        state = self.state
+        if not self.device.fresh(state["page"]):
+            state["status"] = "ready"
+            state["events"].append({"type": "stale_done", "elapsed_ms": self._elapsed()})
+            raise StalePage("Screen changed since the decision. Choose again.")
+        state["status"] = status
+        state["elapsed_ms"] = self._elapsed()
+        return self.snapshot()
+
+    def _veto_done(self, goal: Dict[str, Any]) -> Dict[str, Any]:
+        """The goal gate rejected the DONE: run the built-in WAIT instead, then re-decide
+        with fresh evidence. Waiting lets a dynamic screen (e.g. playing media) evolve."""
+        state = self.state
+        state["done_vetoes"] += 1
+        state["events"].append(
+            {"type": "done_vetoed", "goal_probability": goal.get("probability"), "elapsed_ms": self._elapsed()}
+        )
+        if len(state["history"]) >= MAX_STEPS:
+            state["status"] = "blocked"
+            raise ValueError("Stopped at the %d-action budget" % MAX_STEPS)
+        wait = next(a for a in state["page"]["actions"] if a["id"] == "wait")
+        decision = state["decision"]
+        page = state["page"]
+        self.device.act(wait)
+        state["elapsed_ms"] = self._elapsed()
+        state["history"].append(
+            {
+                "step": len(state["history"]) + 1,
+                "action": wait["label"],
+                "kind": "wait",
+                "choice": wait["id"],
+                "probability": None,
+                "confidence": decision["confidence"],
+                "latency_ms": decision["latency_ms"],
+                "text": None,
+                "text_helper": None,
+                "text_latency_ms": 0,
+                "operation": "DONE",
+                "target": decision["target"],
+                "page_changed": None,
+                "activity_before": page["activity"],
+                "usage": decision["usage"],
+                "executed_ms": self._elapsed(),
+                "elapsed_ms": state["elapsed_ms"],
+            }
+        )
+        state["decision"] = None
+        state["page"] = self.device.observe(screenshot=self.screenshots)
+        state["elapsed_ms"] = self._elapsed()
+        state["history"][-1].update(
+            page_changed=state["page"]["fingerprint"] != page["fingerprint"],
+            activity=state["page"]["activity"],
+            elapsed_ms=state["elapsed_ms"],
+        )
+        if self.record and "screenshot" in state["page"]:
+            (self.record_dir / ("%06d.jpg" % state["elapsed_ms"])).write_bytes(
+                base64.b64decode(state["page"]["screenshot"])
+            )
+        state["status"] = "ready"
+        return self.snapshot()
 
     def _act(self) -> Dict[str, Any]:
         state = self.state
@@ -171,14 +243,20 @@ class Agent:
         if not decision:
             raise ValueError("Predict before acting")
         selected = decision["choice"]
+        goal = decision.get("goal") or {}
         if selected in {"DONE", "BLOCKED"}:
-            if not self.device.fresh(page):
-                state["status"] = "ready"
-                state["events"].append({"type": "stale_done", "elapsed_ms": self._elapsed()})
-                raise StalePage("Screen changed since the decision. Choose again.")
-            state["status"] = "done" if selected == "DONE" else "blocked"
-            state["elapsed_ms"] = self._elapsed()
-            return self.snapshot()
+            # The gate can veto a DONE the operation head proposed; after MAX_DONE_VETOES
+            # consecutive vetoes the repeated DONE wins.
+            if selected == "DONE" and goal.get("satisfied") is False and state["done_vetoes"] < MAX_DONE_VETOES:
+                return self._veto_done(goal)
+            status = "done" if selected == "DONE" else "blocked"
+            return self._accept_stop(status)
+        if goal.get("satisfied") is True:
+            # ...and the gate can end the run even when the operation head wanted another action.
+            state["events"].append(
+                {"type": "goal_done", "goal_probability": goal.get("probability"), "elapsed_ms": self._elapsed()}
+            )
+            return self._accept_stop("done")
         action = next(a for a in page["actions"] if a["id"] == selected)
         if len(state["history"]) >= MAX_STEPS:
             state["status"] = "blocked"

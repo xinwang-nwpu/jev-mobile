@@ -119,6 +119,75 @@ class TestStaleness:
         assert device.observe_count == 4
 
 
+class TestGoalGate:
+    def install_script_with_gates(self, monkeypatch, decisions):
+        queue = list(decisions)
+
+        def fake_choose(page, goal, history):
+            operation, target, gate = queue.pop(0)
+            return make_decision(operation, target, page, goal=gate)
+
+        monkeypatch.setattr(agent_module, "choose", fake_choose)
+
+    def test_gate_ends_run_when_operation_wants_to_continue(self, monkeypatch):
+        device = FakeDevice([simple_tree()])
+        self.install_script_with_gates(monkeypatch, [("CLICK", "1", {"satisfied": True, "probability": 0.95})])
+        agent = Agent("finish the flow", device=device)
+        for _ in agent.run():
+            pass
+        agent.close()
+        assert agent.state["status"] == "done"
+        assert device.acts == []  # the gate fired before the click executed
+        assert "goal_done" in [e["type"] for e in agent.state["events"]]
+
+    def test_gate_vetoes_done_waits_then_accepts_persistent_done(self, monkeypatch):
+        device = FakeDevice([simple_tree()])
+        no = {"satisfied": False, "probability": 0.1}
+        self.install_script_with_gates(monkeypatch, [("DONE", None, no), ("DONE", None, no), ("DONE", None, no)])
+        agent = Agent("finish", device=device)
+        for _ in agent.run():
+            pass
+        agent.close()
+        # Two vetoes (each running the built-in WAIT), then the third DONE wins.
+        assert agent.state["status"] == "done"
+        assert agent.state["done_vetoes"] == 2
+        assert [h["kind"] for h in agent.state["history"]] == ["wait", "wait"]
+        kinds = [e["type"] for e in agent.state["events"]]
+        assert kinds.count("done_vetoed") == 2
+
+    def test_veto_counter_resets_on_non_done_decision(self, monkeypatch):
+        device = FakeDevice([simple_tree()])
+        no = {"satisfied": False, "probability": 0.1}
+        self.install_script_with_gates(
+            monkeypatch,
+            [("DONE", None, no), ("CLICK", "1", no), ("DONE", None, no), ("DONE", None, no), ("DONE", None, no)],
+        )
+        agent = Agent("finish", device=device)
+        for _ in agent.run():
+            pass
+        agent.close()
+        assert agent.state["status"] == "done"
+        # veto → the CLICK resets the counter → two more vetoes before the DONE is accepted.
+        assert kinds_count(agent, "done_vetoed") == 3
+        assert [h["kind"] for h in agent.state["history"]] == ["wait", "click", "wait", "wait"]
+
+    def test_gate_termination_still_requires_freshness(self, monkeypatch):
+        device = FakeDevice([simple_tree()])
+        device.fresh_results = [False, True]
+        yes = {"satisfied": True, "probability": 0.9}
+        self.install_script_with_gates(monkeypatch, [("CLICK", "1", yes), ("DONE", None, yes)])
+        agent = Agent("finish", device=device)
+        for _ in agent.run():
+            pass
+        agent.close()
+        assert agent.state["status"] == "done"
+        assert "stale_done" in [e["type"] for e in agent.state["events"]]
+
+
+def kinds_count(agent, kind):
+    return [e["type"] for e in agent.state["events"]].count(kind)
+
+
 class TestBudgets:
     def test_three_unchanged_actions_block(self, monkeypatch):
         device = FakeDevice([simple_tree()])

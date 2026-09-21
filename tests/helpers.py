@@ -78,7 +78,8 @@ class FakeDevice:
         pass
 
 
-def make_decision(operation: str, target: Optional[str] = None, page: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def make_decision(operation: str, target: Optional[str] = None, page: Optional[Dict[str, Any]] = None,
+                  goal: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     choice = operation
     probabilities = {operation: 1.0}
     target_probabilities = {}
@@ -94,9 +95,9 @@ def make_decision(operation: str, target: Optional[str] = None, page: Optional[D
         "confidence": 0.9,
         "probabilities": probabilities,
         "operation_probabilities": {operation: 1.0},
-        "target_probabilities": target_probabilities,
         "target_probabilities": {},
         "target_confidence": 0.8 if target else None,
+        "goal": goal or {"satisfied": None, "probability": None, "confidence": None},
         "raw_answers": {},
         "model": "fake",
         "usage": {},
