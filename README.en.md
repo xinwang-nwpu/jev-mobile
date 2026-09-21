@@ -6,6 +6,14 @@
 
 Give it a natural-language goal such as "Open Settings and turn on Airplane Mode." [TypeSafe Jev](https://docs.typesafe.ai/) picks an operation and a target from the indexed element table; only when the operation is `TYPE_TEXT` does a small LLM generate the text to enter. The loop never depends on screenshot recognition, so decisions and execution stay fast.
 
+## Demo
+
+For the task "在哔哩哔哩，播放龙卷风视频" (open Bilibili and play the *龙卷风* video): 18 seconds end to end, only 2–3s per action decision, no multimodal model involved at all, and a tiny token footprint.
+
+<a href="docx/demo.mp4"><img src="docx/demo.gif" alt="Live demo: one natural-language goal; Jev decides and executes with one request per step" width="320" /></a>
+
+[Watch the MP4](docx/demo.mp4)
+
 ## The action space
 
 Every observation (one A11Y-tree snapshot) produces a fresh indexed element table:
