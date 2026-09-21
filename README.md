@@ -8,6 +8,7 @@
 
 ## 演示
 针对任务"在哔哩哔哩，播放龙卷风视频"，总共用时18秒每次动作决策只需要2-3s!，完全不需要多模态大模型参与token消耗量极小。
+
 <a href="docx/demo.mp4"><img src="docx/demo.gif" alt="真机演示：一句自然语言目标，Jev 每步一次请求完成决策与执行" width="320" /></a>
 
 [观看 MP4](docx/demo.mp4)
