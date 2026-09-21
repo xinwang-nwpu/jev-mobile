@@ -8,7 +8,9 @@
 
 ## 演示
 
-![demo](docx/demo.mp4)
+<a href="docx/demo.mp4"><img src="docx/demo.gif" alt="真机演示：一句自然语言目标，Jev 每步一次请求完成决策与执行" width="320" /></a>
+
+[观看 MP4](docx/demo.mp4)
 
 ## 动作空间
 
