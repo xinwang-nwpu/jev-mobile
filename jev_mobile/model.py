@@ -18,8 +18,7 @@ from .questions import GOAL_ACHIEVED, NEXT_ACTION, TARGET, TEXT_VALUE
 # endpoint; the API is reachable directly and credentials never need the proxy.
 CLIENT = httpx.Client(http2=True, timeout=25, trust_env=False)
 
-# The goal gate accepts "achieved" at simple majority; the strict GOAL_ACHIEVED wording
-# is what keeps premature acceptance rare.
+# The goal gate accepts "achieved" at simple majority.
 GOAL_THRESHOLD = 0.5
 
 
