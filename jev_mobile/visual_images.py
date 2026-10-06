@@ -23,12 +23,24 @@ def prepare(image):
         overlay = Image.new("RGBA", source.size)
         draw = ImageDraw.Draw(overlay)
         width, height = source.size
-        for coordinate in range(100, 1000, 100):
+        for coordinate in range(0, 1001, 100):
             x, y = round(coordinate * (width - 1) / 1000), round(coordinate * (height - 1) / 1000)
-            draw.line((x, 0, x, height - 1), fill=(255, 255, 255, 35))
-            draw.line((0, y, width - 1, y), fill=(255, 255, 255, 35))
-            draw.text((x + 2, 2), str(coordinate), fill=(255, 70, 70, 220))
-            draw.text((2, y + 2), str(coordinate), fill=(255, 70, 70, 220))
+            color = (255, 225, 130, 115) if coordinate in (0, 500, 1000) else (255, 255, 255, 60)
+            draw.line((x, 0, x, height - 1), fill=color)
+            draw.line((0, y, width - 1, y), fill=color)
+        # Paint labels last so grid lines cannot cross their backgrounds.
+        for coordinate in range(0, 1001, 100):
+            x, y = round(coordinate * (width - 1) / 1000), round(coordinate * (height - 1) / 1000)
+            for label, (left, top) in ((f"x={coordinate}", (x + 4, 4)),
+                                       (f"y={coordinate}", (4, max(20, y + 4)))):
+                box = draw.textbbox((0, 0), label)
+                left = max(2, min(left, width - (box[2] - box[0]) - 3))
+                top = max(2, min(top, height - (box[3] - box[1]) - 3))
+                position = (left - box[0], top - box[1])
+                draw.rectangle((left - 2, top - 2, left + box[2] - box[0] + 2,
+                                top + box[3] - box[1] + 2), fill=(0, 0, 0, 150))
+                draw.text((position[0] + 1, position[1] + 1), label, fill=(0, 0, 0, 230))
+                draw.text(position, label, fill=(255, 255, 255, 245))
         rendered = Image.alpha_composite(source.convert("RGBA"), overlay).convert("RGB")
         buffer = io.BytesIO()
         rendered.save(buffer, format="PNG")
