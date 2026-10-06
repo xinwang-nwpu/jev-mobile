@@ -43,7 +43,7 @@ def configured():
 def initial_progress():
     return {"summary": "", "requirements": [], "plan": [], "subgoal": "", "success_condition": "",
             "memory": [], "feedback": {}, "recoveries": 0, "revision": 0,
-            "needs_plan": True, "plan_cursor": 0, "completed_steps": [], "proposed_answer": ""}
+            "needs_plan": True, "proposed_answer": ""}
 
 
 def page_summary(page):
@@ -190,47 +190,20 @@ class VisualOutputError(RuntimeError):
     """Executor output was repaired unsuccessfully; no device action was issued."""
 
 
-def parse_execution(output, progress, history_size, screen, installed_apps=(), *, page=None):
-    """Advance only an evidenced prefix of this plan; control replies never act."""
+def parse_execution(output, screen, installed_apps=(), *, page=None):
+    """Validate the action/control contract; task progress belongs to the models."""
     if not isinstance(output, dict) or output.get("status") not in {"act", "replan", "complete"}:
         raise ValueError("Executor must choose act, replan or complete")
     _string(output.get("summary"), "executor progress", required=True, limit=8000)
     _string(output.get("reason"), "executor reason", required=True)
     _string(output.get("answer", ""), "answer", limit=12000)
-    cursor = progress["plan_cursor"]
-    saved_cursor, last_index, newly_completed = cursor, 0, []
-    completed = _items(output.get("completed_steps"), "completed plan steps")
-    for item in completed:
-        if (not isinstance(item, dict) or type(item.get("index")) is not int
-                or not last_index < item["index"] <= len(progress["plan"])):
-            raise ValueError("completed_steps indexes must be unique increasing ONE-based plan positions; "
-                             "already completed=%s, next=%d, received=%r (not A11Y indexes or action numbers)" % (
-                                 list(range(1, saved_cursor + 1)), cursor + 1, item))
-        _evidence(item, history_size)
-        last_index = item["index"]
-        # A cumulative report may acknowledge stages the program already saved.
-        # It cannot replace their evidence or advance the cursor again.
-        if item["index"] <= saved_cursor:
-            continue
-        if item["index"] != cursor + 1:
-            raise ValueError("Cannot skip unfinished plan step %d (%s); received completion index %d. "
-                             "If this stage still needs actions, return completed_steps: []." % (
-                                 cursor + 1, progress["plan"][cursor], item["index"]))
-        newly_completed.append(item)
-        cursor += 1
     parsed = None
     if output["status"] == "act":
-        if cursor == len(progress["plan"]):
-            raise ValueError("An act reply cannot complete the entire plan before its action runs. "
-                             "Do not mark the last stage complete if it still needs this action; "
-                             "return completed_steps: [] for that unfinished stage. Otherwise use complete or replan.")
         parsed = parse_action(output, screen, installed_apps, page=page)
     else:
         if any(k in output for k in ("action", "index", "point", "box", "start", "end", "text", "package")):
             raise ValueError("Control replies cannot include a device action")
-        if output["status"] == "complete" and cursor != len(progress["plan"]):
-            raise ValueError("Completion proposal must evidence every remaining plan step")
-    return {**output, "completed_steps": newly_completed, "plan_cursor": cursor, "parsed_action": parsed}
+    return {**output, "parsed_action": parsed}
 
 
 def parse_action(output, screen, installed_apps=(), *, page=None):
@@ -334,9 +307,9 @@ class VisualAgent:
             return result
 
         progress_keys = {
-            "planner": ("summary", "requirements", "plan", "plan_cursor", "completed_steps", "memory", "feedback", "revision"),
-            "executor": ("summary", "requirements", "plan", "plan_cursor", "subgoal", "success_condition", "memory", "feedback"),
-            "verifier": ("summary", "requirements", "completed_steps", "memory", "proposed_answer"),
+            "planner": ("summary", "requirements", "plan", "memory", "feedback", "revision"),
+            "executor": ("summary", "requirements", "plan", "success_condition", "memory", "feedback"),
+            "verifier": ("summary", "requirements", "memory", "proposed_answer"),
         }[role]
         context = {
             "goal": state["goal"], "current_page": page_view(state["page"]),
@@ -350,15 +323,12 @@ class VisualAgent:
             # Preserve early supplied/read values without resending the whole navigation history.
             context["entered_values"] = [outcome(h) for h in state["history"] if h.get("text")]
             context["elements"] = visual_elements(state["page"])
-            context["completed_plan_indexes"] = list(range(1, progress["plan_cursor"] + 1))
-            context["next_plan_index"] = (progress["plan_cursor"] + 1
-                                          if progress["plan_cursor"] < len(progress["plan"]) else None)
         if role == "planner":
             context["recovery_reason"] = state["recovery_reason"]
             handoff = state["handoff"]
             context["handoff"] = ({"reason": handoff["reason"], "after_step": handoff["after_step"],
                                    "last_fast_observation": page_view(handoff.get("last_fast_observation"))} if handoff else None)
-        hint = progress["subgoal"] + " ".join(progress["plan"][progress["plan_cursor"]:progress["plan_cursor"] + 1])
+        hint = progress["subgoal"]
         if not progress["plan"]:
             hint = state["goal"]
         if role != "verifier" and ("launcher" in (state["page"].get("app") or "").lower()
@@ -473,7 +443,7 @@ class VisualAgent:
                                           lambda o: parse_plan(o, len(state["history"]), progress["requirements"]))
             progress.update({k: proposal[k] for k in ("summary", "requirements", "plan", "subgoal", "success_condition")})
             progress.update(memory=proposal["memory"], revision=progress["revision"] + 1,
-                            needs_plan=False, plan_cursor=0, completed_steps=[], proposed_answer="")
+                            needs_plan=False, proposed_answer="")
             state["events"].append({"type": "visual_plan", "subgoal": progress["subgoal"],
                                     "summary": progress["summary"], "latency_ms": call["latency_ms"],
                                     "elapsed_ms": call["elapsed_ms"] + call["latency_ms"]})
@@ -491,17 +461,14 @@ class VisualAgent:
                 return self.decision("REPLAN", None, None, call, "Window or screen dimensions changed during planning")
         try:
             output, call = self.request("executor", EXECUTOR,
-                                        lambda o: parse_execution(o, progress, len(state["history"]), state["page"]["screen"],
+                                        lambda o: parse_execution(o, state["page"]["screen"],
                                                                   self.installed_apps() if isinstance(o, dict) and o.get("action") == "OPEN_APP" else (),
                                                                   page=state["page"]))
         except VisualOutputError as error:
             operation = "REPLAN" if self.feedback("invalid_executor_output", str(error)) else "BLOCKED"
             return self.decision(operation, None, None, state["model_calls"][-1], str(error))
-        progress.update(summary=output["summary"], plan_cursor=output["plan_cursor"])
-        progress["completed_steps"].extend(output["completed_steps"])
-        progress["subgoal"] = progress["plan"][progress["plan_cursor"]] if progress["plan_cursor"] < len(progress["plan"]) else ""
+        progress.update(summary=output["summary"], subgoal=output["reason"])
         state["events"].append({"type": "visual_progress", "summary": progress["summary"],
-                                "completed": progress["plan_cursor"], "total": len(progress["plan"]),
                                 "elapsed_ms": call["elapsed_ms"] + call["latency_ms"]})
         if output["status"] == "replan":
             operation = "REPLAN" if self.feedback("plan_deviation", output["reason"]) else "BLOCKED"

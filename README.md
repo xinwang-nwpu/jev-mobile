@@ -60,7 +60,7 @@ VISION_MODEL=你的视觉模型名
 
 视觉输入按角色裁剪：Planner 和 Verifier 保留全程精简动作摘要、最近 3 次结果；Executor 使用当前计划、当前控件和最近 2 次结果，另保留早期输入原文。原始任务和约束始终提供，完整审计记录留在 trace；记忆由 Planner 维护为最多 20 个稳定 key 的当前事实快照。支持点/区域点击、长按、替换/追加/已聚焦输入、任意方向滑动、启动已安装 App、返回、主页、回车和可调等待。坐标为 0–1000 整数，按原生 PNG 尺寸映射，图片等比例缩放且不裁剪。
 
-Planner 首次规划后，Executor 根据每轮新观察持续执行，凭证据推进计划阶段；出现偏差、失败、卡住、过期动作或完成复核否决时再重规划。正常步骤不重复调用 Planner，Executor 的完成提议也必须经过独立复核。
+Planner 首次规划后，Executor 根据每轮截图、累计摘要和实际动作结果判断剩余工作，持续执行；程序不维护阶段计数或校验完成阶段编号。出现偏差、失败、卡住、过期动作或完成复核否决时再重规划。正常步骤不重复调用 Planner，Executor 的完成提议也必须经过独立复核。
 
 交接后视觉接管剩余任务，共享 60 次动作尝试和 240 次决策模型调用尝试，含规划、执行、复核、失败和格式纠正。无效输出每阶段最多 3 次尝试；执行失败、卡住或完成被否决会反馈重规划，连续 3 次恢复后阻塞。`--no-screenshots` 仅跳过快路径截图；关闭恢复用 `--no-vision-fallback`。轨迹保存模式、子目标、前后页面、失败、各角色响应和用量。
 
@@ -74,7 +74,7 @@ python -m jev_mobile --vision-only --task "你的任务"
 
 也可配置 `vision_only: true`。提示词位于 `jev_mobile/visual_prompts.py`；默认三种角色共用 `VISION_MODEL`，可通过 `VISION_PLANNER_MODEL` / `VISION_EXECUTOR_MODEL` / `VISION_VERIFIER_MODEL` 分别指定。
 
-视觉路径也提供当前 A11Y 编号表，支持 `{"action":"CLICK","index":1}` 这种目标参数，以及按编号长按/输入；模型实际返回还须包含 status、summary、completed_steps、reason 和 expected_effect。编号复用 Jev 元素表，执行前复读核对，避免旧编号点错新控件。A11Y 不可用时保留坐标操作；一次探测失败后在本次设备连接内停用后续探测，重跑会重新尝试。详见 [编号与坐标执行](docs/visual-agent.md#a11y-编号与坐标共同执行)。
+视觉路径也提供当前 A11Y 编号表，支持 `{"action":"CLICK","index":1}` 这种目标参数，以及按编号长按/输入；执行动作时，模型实际返回还须包含 status、summary、reason 和 expected_effect。编号复用 Jev 元素表，执行前复读核对，避免旧编号点错新控件。A11Y 不可用时保留坐标操作；一次探测失败后在本次设备连接内停用后续探测，重跑会重新尝试。详见 [编号与坐标执行](docs/visual-agent.md#a11y-编号与坐标共同执行)。
 
 ## 为什么快
 

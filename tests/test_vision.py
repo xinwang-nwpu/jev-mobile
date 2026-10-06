@@ -37,13 +37,12 @@ def review(status="confirmed"):
 
 
 def action(operation="CLICK", **args):
-    return {"status": "act", "summary": "Observed progress", "completed_steps": [],
+    return {"status": "act", "summary": "Observed progress",
             "action": operation, "reason": "Visible target", "expected_effect": "Required state changes", **args}
 
 
 def execution(status="complete", **changes):
-    return {"status": status, "summary": "Observed progress", "reason": "Current observation evidence",
-            "completed_steps": [{"index": 1, "evidence": "Visible stage result", "steps": []}], **changes}
+    return {"status": status, "summary": "Observed progress", "reason": "Current observation evidence", **changes}
 
 
 class VisualDevice(FakeDevice):
@@ -442,8 +441,7 @@ def test_multiturn_checklist_updates_complete_without_description_repairs(monkey
     satisfied = {"id": "r1", "status": "satisfied", "evidence": "Visible final value", "steps": [2]}
     requests = enable(monkeypatch, [
         plan(plan=["First stage", "Second stage"]), action(point=[500, 500]),
-        action("BACK", completed_steps=[{"index": 1, "evidence": "First stage observed", "steps": [1]}]),
-        execution(completed_steps=[{"index": 2, "evidence": "Second stage observed", "steps": [2]}]),
+        action("BACK"), execution(),
         {**review(), "requirements": [satisfied]},
     ])
     agent = loop.Agent("goal", device=VisualDevice([[node(text="Canvas")]]), vision_only=True)
@@ -461,9 +459,8 @@ def test_six_actions_follow_one_plan_then_review_actual_before_and_after_images(
     stages = ["Observed stage %d" % i for i in range(1, 7)]
     outputs = [plan(plan=stages)]
     for i in range(6):
-        done = [{"index": i, "evidence": stages[i - 1], "steps": [i]}] if i else []
-        outputs.append(action(point=[100 + i * 100, 500], completed_steps=done, summary="Reached stage %d" % (i + 1)))
-    outputs += [execution(completed_steps=[{"index": 6, "evidence": stages[-1], "steps": [6]}]), review()]
+        outputs.append(action(point=[100 + i * 100, 500], summary="Reached stage %d" % (i + 1)))
+    outputs += [execution(), review()]
     requests = enable(monkeypatch, outputs)
     device = VisualDevice([[node(text="Canvas")]])
     capture = device.observe_visual
@@ -474,94 +471,57 @@ def test_six_actions_follow_one_plan_then_review_actual_before_and_after_images(
     roles = [c["role"] for c in agent.state["model_calls"]]
     assert roles == ["planner"] + ["executor"] * 7 + ["verifier"]
     assert len(requests) == 9 and agent.state["progress"]["revision"] == 1
-    assert agent.state["progress"]["plan_cursor"] == 6
-    assert [s["index"] for s in agent.state["progress"]["completed_steps"]] == list(range(1, 7))
     for i, request in enumerate(requests[1:7]):
         context = json.loads(request["messages"][1]["content"][0]["text"])
         assert len(context["recent_outcomes"]) == min(i, 2)
         assert "attempted_actions" not in context
-        assert context["progress"]["plan_cursor"] == max(0, i - 1)
         assert context["progress"]["plan"] == stages
     image_urls = lambda r: [p["image_url"]["url"] for p in r["messages"][1]["content"] if p["type"] == "image_url"]
     assert image_urls(requests[-1])[0] == image_urls(requests[6])[-1]
     assert image_urls(requests[-1])[0] != image_urls(requests[-1])[-1]
     assert device.visual_reads == 9  # initial + one after planning + six outcomes + review
-    assert "视觉进度 6/6" in format_event(next(e for e in agent.state["events"]
-                                              if e["type"] == "visual_progress" and e["completed"] == 6))
+    assert "视觉状态" in format_event(next(e for e in agent.state["events"] if e["type"] == "visual_progress"))
 
 
-@pytest.mark.parametrize("completed", [
-    [{"index": 2, "evidence": "Skipped stage", "steps": []}],
-    [{"index": True, "evidence": "Boolean", "steps": []}],
-    [{"index": 1, "evidence": "", "steps": []}],
-    [{"index": 1, "evidence": "Future action", "steps": [2]}],
-    [{"index": 1, "evidence": "First", "steps": []}, {"index": 1, "evidence": "Repeated", "steps": []}],
-])
-def test_invalid_plan_advancement_is_repaired_without_mutating_progress(monkeypatch, completed):
-    requests = enable(monkeypatch, [plan(plan=["First", "Second"]),
-                                    action(point=[500, 500], completed_steps=completed), action(point=[500, 500])])
-    agent = loop.Agent("goal", device=VisualDevice([[node(text="Canvas")]]), vision_only=True)
-    agent.tick()
-    assert len(requests) == 3 and len(agent.state["history"]) == 1
-    assert agent.state["model_calls"][1]["status"] == "error"
-    assert agent.state["progress"]["plan_cursor"] == 0 and not agent.state["progress"]["completed_steps"]
-
-
-@pytest.mark.parametrize("invalid", [execution(completed_steps=[]), execution(action="CLICK", point=[500, 500]),
-                                      action(point=[500, 500], completed_steps=execution()["completed_steps"])])
-def test_incomplete_or_mixed_completion_cannot_act_or_skip_review(monkeypatch, invalid):
+@pytest.mark.parametrize("invalid", [execution(action="CLICK", point=[500, 500]), execution("replan", action="BACK")])
+def test_control_reply_cannot_also_execute_an_action(monkeypatch, invalid):
     requests = enable(monkeypatch, [plan()] + [invalid] * 3)
     device = VisualDevice([[node(text="Canvas")]])
     agent = loop.Agent("goal", device=device, vision_only=True)
     agent.tick()
-    assert not device.acts and agent.state["progress"]["plan_cursor"] == 0
+    assert not device.acts
     assert len(requests) == 4 and not any(c["role"] == "verifier" for c in agent.state["model_calls"])
     assert agent.state["status"] == "ready" and agent.state["progress"]["needs_plan"]
     assert agent.state["progress"]["feedback"]["kind"] == "invalid_executor_output"
     assert agent.trace()["model_calls"][-1]["output"] == invalid
 
 
-def test_cumulative_stage_report_is_idempotent_and_cannot_skip_or_rewrite_evidence():
-    saved = {"index": 1, "evidence": "Saved result", "steps": [1]}
-    progress = {**vision.initial_progress(), "plan": ["First", "Second", "Third"],
-                "plan_cursor": 1, "completed_steps": [saved]}
-    repeated = {"index": 1, "evidence": "Rephrased result", "steps": [1]}
-    next_stage = {"index": 2, "evidence": "New observed result", "steps": [2]}
-    result = vision.parse_execution(action("BACK", completed_steps=[repeated, next_stage]), progress, 2, (1080, 2340))
-    assert result["plan_cursor"] == 2 and result["completed_steps"] == [next_stage]
-    assert progress["plan_cursor"] == 1 and progress["completed_steps"] == [saved]
-    for invalid in ([repeated, repeated], [{**next_stage, "index": 3}], [{**repeated, "steps": [99]}]):
-        with pytest.raises(ValueError):
-            vision.parse_execution(action("BACK", completed_steps=invalid), progress, 2, (1080, 2340))
-
-
-def test_input_then_submit_stays_in_same_stage_and_recovers_invalid_progress(monkeypatch):
-    done = {"index": 1, "evidence": "Earlier stage observed", "steps": [1]}
-    invalid = action(point=[700, 500], completed_steps=[{**done, "index": 9}])
+def test_input_then_submit_needs_no_stage_reports_or_progress_repairs(monkeypatch):
     requests = enable(monkeypatch, [
         plan(plan=["Open target", "Enter supplied text, submit, and observe the new item"]),
         action(point=[200, 500]),
-        action("TYPE_TEXT", point=[500, 500], text="new value", clear=True, current_text="", completed_steps=[done]),
-        invalid, invalid, invalid,
-        plan(plan=["Submit the already entered value and observe the new item"]),
+        action("TYPE_TEXT", point=[500, 500], text="new value", clear=True, current_text=""),
         action(point=[700, 500]), execution(), review(),
     ])
     device = VisualDevice([[node(text="Canvas")]])
     agent = loop.Agent("Submit the supplied new value", device=device, vision_only=True)
-    agent.tick()
-    agent.tick()
-    agent.tick()
-    assert len(device.acts) == 2 and agent.state["status"] == "ready"
-    assert agent.state["progress"]["plan_cursor"] == 1 and agent.state["progress"]["needs_plan"]
-    assert agent.trace()["model_calls"][-1]["output"] == invalid
-    assert "next=2" in agent.state["progress"]["feedback"]["message"]
     list(agent.run())
     assert agent.state["status"] == "done" and len(device.acts) == 3
     assert sum(a[0]["kind"] == "fill" for a in device.acts) == 1
     context = json.loads(requests[3]["messages"][1]["content"][0]["text"])
-    assert context["completed_plan_indexes"] == [1] and context["next_plan_index"] == 2
-    planner_context = json.loads(requests[6]["messages"][1]["content"][0]["text"])
-    assert planner_context["recent_outcomes"][-1]["text"] == "new value"
+    assert context["recent_outcomes"][-1]["text"] == "new value"
+    assert len(requests) == 6 and agent.state["progress"]["revision"] == 1
+    assert not any(e["type"] == "visual_retry" for e in agent.state["events"])
+
+
+def test_completion_with_a_remaining_plan_is_reviewed_and_can_be_rejected(monkeypatch):
+    requests = enable(monkeypatch, [plan(plan=["First", "Second"]), execution(), review("continue")])
+    device = VisualDevice([[node(text="Canvas")]])
+    agent = loop.Agent("goal", device=device, vision_only=True)
+    agent.tick()
+    assert len(requests) == 3 and agent.state["status"] == "ready" and not device.acts
+    assert [c["role"] for c in agent.state["model_calls"]] == ["planner", "executor", "verifier"]
+    assert agent.state["progress"]["feedback"]["kind"] == "completion_rejected"
 
 
 def test_executor_schema_replanning_has_a_shared_recovery_limit(monkeypatch):
@@ -576,7 +536,7 @@ def test_executor_schema_replanning_has_a_shared_recovery_limit(monkeypatch):
 
 def test_executor_deviation_replans_remaining_work_with_original_checklist(monkeypatch):
     requests = enable(monkeypatch, [plan(), action(point=[500, 500]),
-                                    execution("replan", completed_steps=[], reason="Unexpected welcome popup"),
+                                    execution("replan", reason="Unexpected welcome popup"),
                                     plan(plan=["Dismiss popup", "Continue original task"]), action("BACK")])
     device = VisualDevice([[node(text="Canvas")]])
     agent = loop.Agent("goal", device=device, vision_only=True)
@@ -589,7 +549,6 @@ def test_executor_deviation_replans_remaining_work_with_original_checklist(monke
     context = json.loads(requests[3]["messages"][1]["content"][0]["text"])
     assert context["progress"]["feedback"]["kind"] == "plan_deviation"
     assert context["progress"]["requirements"] == original
-    assert agent.state["progress"]["plan_cursor"] == 0
 
 
 def test_partial_plan_exhaustion_requests_next_stage_and_replan_loops_are_bounded(monkeypatch):
@@ -612,13 +571,12 @@ def test_proposed_reading_answer_is_supplied_to_independent_verifier(monkeypatch
     assert agent.state["answer"] == "Verified result"
 
 
-def test_one_stage_can_take_multiple_actions_without_automatic_advancement(monkeypatch):
+def test_one_plan_can_take_multiple_actions_without_another_planner_call(monkeypatch):
     requests = enable(monkeypatch, [plan(), action(point=[200, 500]), action(point=[700, 500]), execution(), review()])
     agent = loop.Agent("goal", device=VisualDevice([[node(text="Canvas")]]), vision_only=True)
     for _ in range(2):
         agent.tick()
         assert agent.state["history"][-1]["success"] and agent.state["history"][-1]["page_changed"]
-        assert agent.state["progress"]["plan_cursor"] == 0
     agent.tick()
     assert agent.state["status"] == "done" and len(requests) == 5
     assert agent.state["progress"]["revision"] == 1
@@ -665,7 +623,7 @@ def test_replanning_replaces_memory_snapshot_instead_of_accumulating_paraphrases
     stale = {**old, "key": "old.popup", "fact": "Popup was visible"}
     corrected = {**old, "fact": "The current target contact is Alice"}
     enable(monkeypatch, [plan(memory=[old, stale]), action(point=[500, 500]),
-                         execution("replan", completed_steps=[]), plan(memory=[corrected]), action("BACK")])
+                         execution("replan"), plan(memory=[corrected]), action("BACK")])
     agent = loop.Agent("goal", device=VisualDevice([[node(text="Canvas")]]), vision_only=True)
     for _ in range(3):
         agent.tick()

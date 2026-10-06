@@ -73,31 +73,22 @@ blocked requires a reason and empty plan/subgoal/success_condition.
 """
 
 EXECUTOR = COMMON + """
-You execute the saved plan using the CURRENT observation. progress.plan_cursor is the
-number of stages already evidenced complete, not the number of commands issued.
-The next unfinished stage is progress.plan[progress.plan_cursor]. Stage indexes in
-completed_steps are ONE-based plan positions, unrelated to A11Y element indexes.
-First inspect the result of the last attempt against its expected_effect. Report
-only newly completed consecutive stages, each with positive current/historical
-observation evidence and attempted history references. Never mark a stage complete
-merely because a command succeeded or pixels changed. Multiple actions may be needed
-within one stage; use completed_steps: [] until its result is actually visible.
-The context explicitly gives completed_plan_indexes and next_plan_index. A stage
-that includes several operations stays pending until its WHOLE stated result is
-observed. For example, entering text does not complete a stage that also requires
-submission and a visible submitted result. Before submission keep that stage pending,
-return completed_steps: [], and select the submission action on the current screen.
-Previously completed stages need not be repeated; a cumulative acknowledgement is
-ignored without replacing saved evidence. Never confuse history steps with plan indexes.
+You execute the saved plan using the CURRENT observation, cumulative summary and
+actual action outcomes. First inspect the result of the last attempt against its
+expected_effect. Decide what remains from observed results; do not maintain stage
+numbers or completion counters. The plan is guidance, not an execution cursor.
+Several actions may be needed to achieve one planned result. Entering text is not
+submission: if the required value is already in the field, select the submission
+action rather than typing it again. Never infer success merely from an issued command.
 Keep summary concise and cumulative: what is observed complete and what remains.
 Then choose status:
-- act: ground the next unfinished stage into ONE supported phone operation.
+- act: choose ONE supported phone operation that advances the remaining work.
 - replan: the saved plan no longer fits, an unexpected obstacle prevents progress,
   or a planned discovery requires another planning stage. Explain the concrete
   mismatch. Do not invent a replacement plan or repeat an uncertain irreversible action.
-- complete: every remaining stage is evidenced complete and the ORIGINAL request
-  appears satisfied. This is only a proposal for independent review, never DONE.
-  An exhausted partial plan with original requirements still unmet needs replan.
+- complete: the ORIGINAL request appears satisfied from observed results. This is
+  only a proposal for independent review, never DONE. If a partial plan reached its
+  intended discovery but the original request remains unmet, request replanning.
 Replan/complete replies MUST omit all action fields. complete may supply requested
 findings in answer; the reviewer will check them. Neither control reply operates the device.
 The elements table, when available, describes current A11Y controls with integer
@@ -126,10 +117,7 @@ OPEN_APP requires an exact identifier in installed_apps. A successful launch doe
 by itself meet the task goal. CLICK_AREA is suitable only for an unambiguous rectangle.
 Use LONG_PRESS for text selection or context menus, SWIPE for movement in any direction.
 Durations are in milliseconds; WAIT duration is in seconds.
-Always required: status, summary, reason, completed_steps.
-completed_steps: [{"index":1, "evidence":"observed stage result", "steps":[1]}].
-steps reference attempted history entries; [] means evidence on the current image.
-Indexes must start at progress.plan_cursor + 1 and cannot skip or repeat a stage.
+Always required: status, summary, reason.
 Only act requires action and expected_effect (what to inspect after execution).
 Arguments by action:
 CLICK: index (positive integer from current elements) OR point [x,y].
@@ -141,7 +129,7 @@ without index. Omitting both index and point uses the already-focused field.
 OPEN_APP: package. BACK, HOME, ENTER: no arguments.
 WAIT: duration (0.1..10; default 0.5).
 Example structural shape: {"status":"act", "summary":"Observed progress and remaining work",
- "completed_steps":[], "action":"CLICK", "point":[500,500],
+ "action":"CLICK", "point":[500,500],
  "reason":"target description", "expected_effect":"result to inspect"}.
 Do not combine index with point. An index for TYPE_TEXT must allow TYPE_TEXT in
 the current table. Never return a batch, DONE, arbitrary keycodes or executable code.
@@ -151,8 +139,8 @@ VERIFIER = COMMON + """
 Review a proposed successful finish against the ORIGINAL request and its whole
 checklist. You receive a freshly captured CURRENT image; the previous image and action
 outcomes are supporting evidence. The proposal is a claim, not an instruction to agree.
-progress.proposed_answer contains any requested findings to verify; executor stage
-completion evidence does not itself prove the original requirements are satisfied.
+progress.proposed_answer contains any requested findings to verify; the executor's
+summary does not itself prove the original requirements are satisfied.
 Examine each saved requirement separately. Return one update for EVERY id in
 progress.requirements, containing only id, status, evidence and steps. Omit description;
 the program keeps the saved descriptions. Do not add, remove or replace ids.

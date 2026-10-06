@@ -69,7 +69,7 @@ def format_event(event: Dict) -> str:
     if kind == "visual_plan":
         return "%s 视觉规划（请求 %dms）：%s · %s" % (elapsed, event.get("latency_ms", 0), event["summary"], event["subgoal"])
     if kind == "visual_progress":
-        return "%s 视觉进度 %d/%d：%s" % (elapsed, event["completed"], event["total"], event["summary"])
+        return "%s 视觉状态：%s" % (elapsed, event["summary"])
     if kind == "visual_review":
         return "%s 完成复核 %s（请求 %dms）：%s" % (elapsed, event["status"], event.get("latency_ms", 0), event["reason"])
     if kind == "round_timing":
