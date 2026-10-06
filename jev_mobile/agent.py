@@ -48,6 +48,18 @@ def usage_totals(state: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def covered_device_ms(records, start, end):
+    """Union measured intervals: parent/child stages and parallel reads overlap."""
+    total, right = 0, start
+    intervals = sorted((r["elapsed_ms"], r["elapsed_ms"] + r["duration_ms"]) for r in records if r["phase"] == "run")
+    for left, stop in intervals:
+        left, stop = max(left, start, right), min(stop, end)
+        if stop > left:
+            total += stop - left
+            right = stop
+    return total
+
+
 class Agent:
     def __init__(
         self,
@@ -96,6 +108,10 @@ class Agent:
             progress=vision.initial_progress(),
             model_calls=[],
             device_timings=[],
+            round_timings=[],
+            settings={"action_interval": self.action_interval, "fast_screenshots": self.screenshots,
+                      "vision_only": vision_only, "vision_fallback": self.vision_fallback,
+                      "action_limit": MAX_STEPS, "model_call_limit": MAX_STEPS * 4},
             action_limit=MAX_STEPS,
             answer="",
         )
@@ -134,6 +150,8 @@ class Agent:
             "progress": state["progress"],
             "model_calls": state["model_calls"],
             "device_timings": state["device_timings"],
+            "round_timings": state["round_timings"],
+            "settings": state["settings"],
             "answer": state["answer"],
             "usage": usage_totals(state),
             "history": state["history"],
@@ -142,7 +160,7 @@ class Agent:
             "events": state["events"],
             "decisions": [
                 {
-                    **{k: d.get(k) for k in ("operation", "target", "confidence", "target_confidence", "latency_ms", "mode", "model", "action", "evidence", "reason")},
+                    **{k: d.get(k) for k in ("operation", "target", "confidence", "target_confidence", "latency_ms", "mode", "model", "role", "action", "evidence", "reason")},
                     "goal": d.get("goal"),
                     "observed": _observed(d),
                 }
@@ -158,12 +176,40 @@ class Agent:
             record = dict(item)
             started = record.pop("started_at")
             origin = self.state["started_at"]
-            record.update(elapsed_ms=max(0, round((started - origin) * 1000)) if origin else 0,
-                          phase="startup" if not origin or started < origin else "run")
+            record.update(elapsed_ms=max(0, round((started - origin) * 1000)) if origin is not None else 0,
+                          phase="startup" if origin is None or started < origin else "run")
             self.state["device_timings"].append(record)
         pending.clear()
 
     def tick(self) -> Dict[str, Any]:
+        state = self.state
+        self._collect_device_timings()
+        started = time.perf_counter()
+        if state["started_at"] is None:
+            state["started_at"] = started
+        begin = round((started - state["started_at"]) * 1000)
+        calls, text_calls, actions, stages = len(state["model_calls"]), len(state["text_calls"]), len(state["history"]), len(state["device_timings"])
+        try:
+            result = self._tick()
+        finally:
+            ended = time.perf_counter()
+            self._collect_device_timings()
+            state["elapsed_ms"] = round((ended - state["started_at"]) * 1000)
+            duration = round((ended - started) * 1000)
+            model_ms = (sum(c.get("latency_ms", 0) for c in state["model_calls"][calls:])
+                        + sum(c.get("latency_ms", 0) for c in state["text_calls"][text_calls:]))
+            device_ms = min(duration, covered_device_ms(state["device_timings"][stages:], begin, state["elapsed_ms"]))
+            timing = {"round": len(state["round_timings"]) + 1, "mode": state["mode"], "status": state["status"],
+                      "elapsed_ms": state["elapsed_ms"], "duration_ms": duration, "model_ms": model_ms,
+                      "device_ms": device_ms, "other_ms": max(0, duration - model_ms - device_ms),
+                      "requests": len(state["model_calls"]) - calls + len(state["text_calls"]) - text_calls,
+                      "actions": len(state["history"]) - actions}
+            state["round_timings"].append(timing)
+            state["events"].append({"type": "round_timing", **timing})
+        result["elapsed_ms"] = state["elapsed_ms"]
+        return result
+
+    def _tick(self) -> Dict[str, Any]:
         state = self.state
         try:
             if not self._predict():
@@ -300,6 +346,7 @@ class Agent:
                 "goal_probability": state["decision"]["goal"]["probability"],
                 "reason": state["decision"].get("reason"),
                 "model": state["decision"]["model"],
+                "role": state["decision"].get("role", "fast"),
             }
         )
         state["status"] = "predicted"
@@ -471,7 +518,8 @@ class Agent:
             yield self.tick()
 
     def _elapsed(self) -> int:
-        return round((time.perf_counter() - self.state["started_at"]) * 1000) if self.state["started_at"] else 0
+        origin = self.state["started_at"]
+        return round((time.perf_counter() - origin) * 1000) if origin is not None else 0
 
     def close(self) -> None:
         self.device.close()

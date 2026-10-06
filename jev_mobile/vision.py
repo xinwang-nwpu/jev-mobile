@@ -374,10 +374,13 @@ class VisualAgent:
             raw = None
             error_kind, fatal = "request_error", False
             try:
+                body = {"model": model, **options, "response_format": {"type": "json_object"}, "messages": messages}
+                call["request_bytes"] = len(json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+                call["endpoint_host"] = urlsplit(url).hostname
                 response = post_json(
                     url,
                     os.environ["VISION_MODEL_API_KEY"],
-                    {"model": model, **options, "response_format": {"type": "json_object"}, "messages": messages},
+                    body,
                     timeout=timeout,
                 )
                 error_kind = "response_format"
@@ -447,7 +450,8 @@ class VisualAgent:
             progress.update(memory=proposal["memory"], revision=progress["revision"] + 1,
                             needs_plan=False, plan_cursor=0, completed_steps=[], proposed_answer="")
             state["events"].append({"type": "visual_plan", "subgoal": progress["subgoal"],
-                                    "summary": progress["summary"], "elapsed_ms": call["elapsed_ms"] + call["latency_ms"]})
+                                    "summary": progress["summary"], "latency_ms": call["latency_ms"],
+                                    "elapsed_ms": call["elapsed_ms"] + call["latency_ms"]})
             if proposal["status"] == "blocked":
                 return self.decision("BLOCKED", None, None, call, proposal["reason"])
             if proposal["status"] == "complete":
@@ -489,7 +493,8 @@ class VisualAgent:
                                    lambda o: parse_review(o, len(state["history"]), progress["requirements"], proposed_answer))
         progress.update(summary=review["summary"], requirements=review["requirements"], success_condition="")
         state["events"].append({"type": "visual_review", "status": review["status"],
-                                "reason": review["reason"], "elapsed_ms": call["elapsed_ms"] + call["latency_ms"]})
+                                "reason": review["reason"], "latency_ms": call["latency_ms"],
+                                "elapsed_ms": call["elapsed_ms"] + call["latency_ms"]})
         if review["status"] == "confirmed":
             state["answer"] = review.get("answer") or proposed_answer
             evidence = "\n".join(r["description"] + ": " + r["evidence"] for r in review["requirements"])
@@ -506,6 +511,7 @@ class VisualAgent:
                 "probabilities": {}, "operation_probabilities": {}, "target_probabilities": {},
                 "target_confidence": None, "goal": {"satisfied": None, "probability": None},
                 "model": call["model"], "usage": call.get("usage", {}), "latency_ms": call["latency_ms"],
+                "role": call["role"],
                 "observed": call["observed"], "mode": "vision", "reason": reason,
                 "subgoal": self.state["progress"]["subgoal"], **extra}
 
@@ -515,7 +521,8 @@ class VisualAgent:
         progress["feedback"] = {"kind": kind, "message": message, "step": len(self.state["history"])}
         progress["recoveries"] += 1
         self.state["events"].append({"type": "visual_replan", **progress["feedback"],
-                                    "elapsed_ms": self.state["elapsed_ms"]})
+                                    "elapsed_ms": round((time.perf_counter() - self.state["started_at"]) * 1000)
+                                    if self.state["started_at"] is not None else self.state["elapsed_ms"]})
         if progress["recoveries"] >= MAX_RECOVERIES:
             self.state.update(status="blocked", answer="Visual recovery exhausted: " + message)
             return False

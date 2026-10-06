@@ -394,7 +394,7 @@ class Device:
         time.sleep(LAUNCH_SETTLE_S)
 
     def list_apps(self):
-        result = self._checked("shell", "pm", "list", "packages")
+        result = self._measure("apps.list", self._checked, "shell", "pm", "list", "packages")
         return sorted(set(re.findall(r"^package:([A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)+)$", result.stdout or "", re.MULTILINE)))
 
     def _tap(self, center: List[int]) -> None:

@@ -112,6 +112,19 @@ def test_summary_reports_latency_and_text_calls():
     assert "tokens" not in summary  # tokens moved to their own always-printed line
 
 
+def test_device_timing_union_does_not_double_count_nested_parallel_or_startup_stages():
+    from jev_mobile.agent import covered_device_ms
+    rows = [{"phase": "run", "elapsed_ms": 0, "duration_ms": 1000},
+            {"phase": "run", "elapsed_ms": 100, "duration_ms": 400},
+            {"phase": "run", "elapsed_ms": 200, "duration_ms": 600},
+            {"phase": "run", "elapsed_ms": 1200, "duration_ms": 400},
+            {"phase": "startup", "elapsed_ms": 0, "duration_ms": 5000}]
+    assert covered_device_ms(rows, 0, 1500) == 1300
+    state = base_state()
+    state["round_timings"] = [{"model_ms": 8000, "device_ms": 2500, "other_ms": 1000}]
+    assert "累计模型 8.0s / 设备阶段 2.5s / 其他 1.0s" in format_summary(state, False)
+
+
 def test_tokens_line_aggregates_both_providers():
     line = format_tokens(base_state())
     # Decision usage uses input/output_tokens; the text helper reports prompt/completion.

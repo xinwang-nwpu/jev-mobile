@@ -792,7 +792,7 @@ def test_change_during_planning_discards_action_and_replans(monkeypatch, changed
     agent = loop.Agent("goal", device=device, vision_only=True)
     agent.tick()
     assert agent.state["status"] == "ready" and not device.acts and len(requests) == 1
-    assert agent.state["events"][-2]["reason"] == "visual_plan_stale"
+    assert any(e.get("reason") == "visual_plan_stale" for e in agent.state["events"])
 
 
 def indexed_page(tree, screen=(1080, 2340)):
@@ -981,6 +981,77 @@ def test_device_stage_timings_survive_failed_input_and_trace_collection(monkeypa
     assert stages["input.focus"]["success"] and stages["input.keyboard_wait"]["success"]
     assert all(t["duration_ms"] >= 0 and "started_at" not in t for t in trace["device_timings"])
     assert not device.timings and len(agent.trace()["device_timings"]) == len(trace["device_timings"])
+
+
+def test_round_timings_measure_all_models_devices_and_completion_with_a_controlled_clock(monkeypatch):
+    requests = enable(monkeypatch, [plan(), action(point=[500, 500]), execution(), review()])
+    clock = {"now": 100.0}
+    monkeypatch.setattr(loop.time, "perf_counter", lambda: clock["now"])
+    post = vision.post_json
+    def slow_post(*args, **kwargs):
+        clock["now"] += 2
+        return post(*args, **kwargs)
+    monkeypatch.setattr(vision, "post_json", slow_post)
+    device = IndexedVisualDevice([[node(text="Canvas")]])
+    capture, act = device.observe_visual, device.act
+    def slow_capture():
+        with device._timed("observe_visual.total"):
+            clock["now"] += 0.5
+            return capture()
+    def slow_act(action, text=None):
+        with device._timed("action.total"):
+            clock["now"] += 1
+            act(action, text)
+    device.observe_visual, device.act = slow_capture, slow_act
+    agent = loop.Agent("goal", device=device, vision_only=True)
+    list(agent.run())
+    first, last = agent.trace()["round_timings"]
+    assert (first["duration_ms"], first["model_ms"], first["device_ms"], first["other_ms"]) == (6000, 4000, 2000, 0)
+    assert (last["duration_ms"], last["model_ms"], last["device_ms"], last["other_ms"]) == (4500, 4000, 500, 0)
+    assert first["requests"] == last["requests"] == 2 and last["actions"] == 0
+    assert agent.state["elapsed_ms"] == 10500 and len(requests) == 4
+    assert agent.trace()["model_calls"][-1]["request_bytes"] > 0
+    assert agent.trace()["model_calls"][-1]["endpoint_host"] == "openrouter.ai"
+    assert any(t["phase"] == "startup" for t in agent.trace()["device_timings"])
+    assert "总耗时 6000ms" in format_event({"type": "round_timing", **first})
+    assert "复核器请求" in format_event(next(e for e in agent.state["events"]
+                                             if e["type"] == "visual_decision" and e["operation"] == "DONE"))
+
+
+def test_failed_round_preserves_retry_time_and_final_elapsed(monkeypatch):
+    enable(monkeypatch, [])
+    clock = {"now": 100.0}
+    monkeypatch.setattr(loop.time, "perf_counter", lambda: clock["now"])
+    def failed_post(*args, **kwargs):
+        clock["now"] += 2
+        raise RuntimeError("HTTP 503")
+    monkeypatch.setattr(vision, "post_json", failed_post)
+    agent = loop.Agent("goal", device=VisualDevice([[node(text="Canvas")]]), vision_only=True)
+    with pytest.raises(RuntimeError, match="after 3 attempts"):
+        agent.tick()
+    timing = agent.trace()["round_timings"][-1]
+    assert timing["requests"] == 3 and timing["status"] == "blocked"
+    assert timing["duration_ms"] == timing["model_ms"] == agent.state["elapsed_ms"] == 6000
+    assert timing["actions"] == 0
+
+
+def test_cli_flushes_failure_diagnostics_and_round_timing_before_exit(monkeypatch, tmp_path, capsys):
+    from jev_mobile import __main__ as cli
+    enable(monkeypatch, [RuntimeError("HTTP 503")] * 3)
+    monkeypatch.setattr(cli, "load_env_file", lambda: None)
+    config = tmp_path / "task.yaml"
+    config.write_text("task: inspect\nvision_only: true\n", encoding="utf-8")
+    original = cli.Agent
+    device = VisualDevice([[node(text="Canvas")]])
+    capture = device.observe_visual
+    device.observe_visual = lambda: {**capture(), "screenshot": base64.b64encode(png()).decode("ascii")}
+    monkeypatch.setattr(cli, "Agent", lambda *a, **k: original(*a, device=device, **k))
+    assert cli.main(["--config", str(config), "--record-dir", str(tmp_path / "run")]) == 1
+    output = capsys.readouterr()
+    assert output.out.count("请求失败") == 3 and "本轮 1" in output.out
+    assert "Run stopped" in output.err
+    saved = json.loads((tmp_path / "run" / "trace.json").read_text(encoding="utf-8"))
+    assert saved["round_timings"][0]["requests"] == 3 and saved["settings"]["vision_only"]
 
 
 def test_optional_tree_probe_does_not_run_slow_recovery(monkeypatch):

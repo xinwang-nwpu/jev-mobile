@@ -92,7 +92,7 @@ class TestClickCycles:
         assert len(device.acts) == 4
         assert all(h["page_changed"] for h in agent.state["history"])
         assert device.acts[0][0]["id"] != device.acts[1][0]["id"]
-        assert agent.state["events"][-1]["type"] == "cycle"
+        assert [e["type"] for e in agent.state["events"] if e["type"] != "round_timing"][-1] == "cycle"
 
     def test_repeated_control_advancing_through_new_pages_is_allowed(self, monkeypatch):
         trees = [[node(text="Next", clickable=True), node(text=str(i))] for i in range(5)]
@@ -282,7 +282,7 @@ class TestEvents:
         for _ in agent.run():
             pass
         agent.close()
-        assert [e["type"] for e in agent.state["events"]][-1] == "stuck"
+        assert [e["type"] for e in agent.state["events"] if e["type"] != "round_timing"][-1] == "stuck"
 
     def test_history_keeps_activity_transition(self, monkeypatch):
         device = FakeDevice([simple_tree(), [node(text="Result", clickable=True)]])

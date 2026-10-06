@@ -63,14 +63,18 @@ def format_event(event: Dict) -> str:
     if kind == "handoff":
         return "%s 切换到视觉 Agent：%s" % (elapsed, event["reason"])
     if kind == "visual_decision":
-        return "%s 视觉决策 %s  %s  %dms  %s" % (
-            elapsed, event["operation"], event["model"], event["latency_ms"], event.get("reason") or "")
+        role = {"planner": "规划器", "executor": "执行器", "verifier": "复核器"}.get(event.get("role"), "模型")
+        return "%s 视觉决策 %s  %s  %s请求 %dms  %s" % (
+            elapsed, event["operation"], event["model"], role, event["latency_ms"], event.get("reason") or "")
     if kind == "visual_plan":
-        return "%s 视觉规划：%s · %s" % (elapsed, event["summary"], event["subgoal"])
+        return "%s 视觉规划（请求 %dms）：%s · %s" % (elapsed, event.get("latency_ms", 0), event["summary"], event["subgoal"])
     if kind == "visual_progress":
         return "%s 视觉进度 %d/%d：%s" % (elapsed, event["completed"], event["total"], event["summary"])
     if kind == "visual_review":
-        return "%s 完成复核 %s：%s" % (elapsed, event["status"], event["reason"])
+        return "%s 完成复核 %s（请求 %dms）：%s" % (elapsed, event["status"], event.get("latency_ms", 0), event["reason"])
+    if kind == "round_timing":
+        return "%s 本轮 %d：总耗时 %dms · 模型 %dms（%d 次请求）· 设备阶段 %dms · 其他 %dms" % (
+            elapsed, event["round"], event["duration_ms"], event["model_ms"], event["requests"], event["device_ms"], event["other_ms"])
     if kind == "visual_retry":
         line = "%s 视觉 %s 请求失败（第 %d 次）：%s" % (elapsed, event["role"], event["attempt"], event["error"])
         if "retry_action" in event:
@@ -144,6 +148,10 @@ def format_summary(state: Dict, quiet: bool) -> str:
         if text_calls:
             text_ms = sum(t["latency_ms"] for t in text_calls)
             line += "  文本生成 %d 次均值 %dms" % (len(text_calls), text_ms // len(text_calls))
+    if not quiet and state.get("round_timings"):
+        rounds = state["round_timings"]
+        line += "  累计模型 %.1fs / 设备阶段 %.1fs / 其他 %.1fs" % tuple(
+            sum(r[k] for r in rounds) / 1000 for k in ("model_ms", "device_ms", "other_ms"))
     return line
 
 
@@ -238,18 +246,24 @@ def main(argv=None) -> int:
         return 1
     last_step = 0
     last_event = 0
+    def show_progress():
+        nonlocal last_step, last_event
+        state = agent.state
+        lines = []
+        if not quiet:
+            for event in state["events"][last_event:]:
+                lines.append((event.get("elapsed_ms", 0), 2 if event["type"] == "round_timing" else 0, format_event(event)))
+        for step in state["history"][last_step:]:
+            lines.append((step["elapsed_ms"], 1, format_step(step, quiet)))
+        for _, _, line in sorted(lines, key=lambda item: item[:2]):
+            print(line)
+        last_event, last_step = len(state["events"]), len(state["history"])
+
     try:
         for _ in agent.run():
-            state = agent.state
-            if not quiet:
-                for event in state["events"][last_event:]:
-                    print(format_event(event))
-                last_event = len(state["events"])
-            history = state["history"]
-            for step in history[last_step:]:
-                print(format_step(step, quiet))
-            last_step = len(history)
+            show_progress()
     except (RuntimeError, ValueError) as error:
+        show_progress()
         print("Run stopped: %s" % error, file=sys.stderr)
         status = agent.state["status"]
     else:
