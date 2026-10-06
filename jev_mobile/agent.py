@@ -95,6 +95,7 @@ class Agent:
             handoff=None,
             progress=vision.initial_progress(),
             model_calls=[],
+            device_timings=[],
             action_limit=MAX_STEPS,
             answer="",
         )
@@ -114,6 +115,7 @@ class Agent:
     # -- public view ------------------------------------------------------
 
     def snapshot(self) -> Dict[str, Any]:
+        self._collect_device_timings()
         return {
             **{k: v for k, v in self.state.items() if k != "page"},
             "page": {k: v for k, v in self.state["page"].items() if k not in {"screenshot", "visual_signature"}},
@@ -121,6 +123,7 @@ class Agent:
         }
 
     def trace(self) -> Dict[str, Any]:
+        self._collect_device_timings()
         state = self.state
         return {
             "goal": state["goal"],
@@ -130,6 +133,7 @@ class Agent:
             "handoff": state["handoff"],
             "progress": state["progress"],
             "model_calls": state["model_calls"],
+            "device_timings": state["device_timings"],
             "answer": state["answer"],
             "usage": usage_totals(state),
             "history": state["history"],
@@ -147,6 +151,17 @@ class Agent:
         }
 
     # -- loop -------------------------------------------------------------
+
+    def _collect_device_timings(self):
+        pending = getattr(self.device, "timings", [])
+        for item in pending:
+            record = dict(item)
+            started = record.pop("started_at")
+            origin = self.state["started_at"]
+            record.update(elapsed_ms=max(0, round((started - origin) * 1000)) if origin else 0,
+                          phase="startup" if not origin or started < origin else "run")
+            self.state["device_timings"].append(record)
+        pending.clear()
 
     def tick(self) -> Dict[str, Any]:
         state = self.state

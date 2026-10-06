@@ -262,3 +262,16 @@ def test_ime_switch_waits_for_the_bound_method(monkeypatch):
 def test_node_flags_survive_the_pipeline():
     tree = [node(text="Go", clickable=True)]
     assert _tree_has_interaction_flags(tree) is True
+
+
+def test_index_window_reads_current_default_display_not_override_or_external_display(monkeypatch):
+    device = bare_device(monkeypatch, None)
+    output = ("Display: mDisplayId=2\n init=800x600 cur=800x600\n"
+              " mCurrentFocus=Window{a u0 com.external/.Main}\n"
+              "Display: mDisplayId=0\n init=1080x2340 cur=2340x1080 app=2200x1000\n"
+              " mCurrentFocus=Window{b u0 com.example/.Main}\n")
+    monkeypatch.setattr(device, "_shell", lambda command: subprocess.CompletedProcess(command, 0, output, ""))
+    assert device._index_window() == ("com.example", ".Main", (2340, 1080))
+    for unavailable in ("", "Display: mDisplayId=0\n cur=1080x2340\n mCurrentFocus=null", "Display: mDisplayId=2\n cur=800x600"):
+        monkeypatch.setattr(device, "_shell", lambda command: subprocess.CompletedProcess(command, 0, unavailable, ""))
+        assert device._index_window() is None

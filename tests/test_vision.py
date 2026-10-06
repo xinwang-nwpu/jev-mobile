@@ -11,7 +11,7 @@ from PIL import Image
 
 import jev_mobile.agent as loop
 from jev_mobile import vision, visual_images
-from jev_mobile.a11y import snapshot_state
+from jev_mobile.a11y import fingerprint, snapshot_state
 from jev_mobile.device import Device
 from jev_mobile.__main__ import format_event, format_step
 from helpers import FakeDevice, make_decision, node
@@ -797,12 +797,21 @@ def test_change_during_planning_discards_action_and_replans(monkeypatch, changed
 
 def indexed_page(tree, screen=(1080, 2340)):
     page = snapshot_state(tree, {"app": "com.example", "activity": "Main"}, "vision", screen)
-    page.update(a11y_fingerprint=page["fingerprint"], a11y_source="test", a11y_error=None)
+    page.update(a11y_fingerprint=fingerprint({**page, "text": ""}), a11y_source="test", a11y_error=None)
     return page
 
 
-class IndexedVisualDevice(VisualDevice):
+class IndexedVisualDevice(VisualDevice, Device):
     fresh_index = Device.fresh_index
+
+    def _focus_app_activity(self):
+        return "com.example", "Main"
+
+    def _index_window(self):
+        return "com.example", "Main", tuple(self.screen)
+
+    def _read_tree(self, attempts=1):
+        return self.trees[min(len(self.acts), len(self.trees) - 1)], {}, "test"
 
     def observe_visual(self):
         pixels = super().observe_visual()
@@ -897,16 +906,58 @@ def test_device_attaches_current_a11y_and_guard_ignores_pixel_animation(monkeypa
     monkeypatch.setattr(device, "_read_tree", lambda attempts: (tree, {}, "portal"))
     monkeypatch.setattr(device, "_screencap_bytes", png)
     monkeypatch.setattr(device, "_focus_app_activity", lambda: ("com.example", "Main"))
+    monkeypatch.setattr(device, "_index_window", lambda: ("com.example", "Main", tuple(device.screen)))
     page = device.observe_visual()
     assert page["a11y_source"] == "portal" and vision.visual_elements(page)[0]["index"] == 1
-    monkeypatch.setattr(device, "_screencap_bytes", lambda: png(color=(200, 200, 200)))
+    monkeypatch.setattr(device, "_screencap_bytes", lambda: pytest.fail("Light guard must not screenshot"))
     tree[1]["text"] = "Clock changed"
     assert device.fresh_index(page)
     tree[:] = [node(text="Button", clickable=True, bounds="[400,100][800,200]")]
     assert not device.fresh_index(page)
     tree[:] = [node(text="Button", clickable=True), node(text="Clock")]
-    monkeypatch.setattr(device, "_screencap_bytes", lambda: png(size=(1080, 1920)))
+    monkeypatch.setattr(device, "_index_window", lambda: ("com.example", "Main", (1080, 1920)))
     assert not device.fresh_index(page)
+
+
+def test_index_guard_checks_window_again_after_tree_and_keeps_safe_fallback(monkeypatch):
+    device = Device.__new__(Device)
+    tree = [node(text="Button", clickable=True)]
+    page = indexed_page(tree)
+    window = ("com.example", "Main", tuple(page["screen"]))
+    windows = iter([window, ("com.other", "Other", window[2])])
+    monkeypatch.setattr(device, "_index_window", lambda: next(windows))
+    monkeypatch.setattr(device, "_read_tree", lambda attempts: (tree, {}, "test"))
+    monkeypatch.setattr(device, "observe_visual", lambda: pytest.fail("Unexpected full observation"))
+    assert not device.fresh_index(page)
+    monkeypatch.setattr(device, "_index_window", lambda: None)
+    monkeypatch.setattr(device, "observe_visual", lambda: page)
+    assert device.fresh_index(page)
+    assert any(t["stage"] == "guard.index.fallback" for t in device.timings)
+    monkeypatch.setattr(device, "_index_window", lambda: window)
+    def failed_tree(attempts):
+        raise RuntimeError("Tree unavailable")
+    monkeypatch.setattr(device, "_read_tree", failed_tree)
+    assert not device.fresh_index(page)
+    assert any(t["stage"] == "guard.index.a11y" and not t["success"] for t in device.timings)
+
+
+def test_device_stage_timings_survive_failed_input_and_trace_collection(monkeypatch):
+    enable(monkeypatch, [])
+    device = IndexedVisualDevice([[node(text="Canvas")]])
+    agent = loop.Agent("goal", device=device, vision_only=True)
+    monkeypatch.setattr(device, "_tap", lambda center: None)
+    monkeypatch.setattr(device, "_wait_keyboard", lambda: None)
+    def failed_text(*args, **kwargs):
+        raise RuntimeError("Input failed")
+    monkeypatch.setattr(device, "_send_text", failed_text)
+    with pytest.raises(RuntimeError, match="Input failed"):
+        Device.act(device, {"kind": "fill", "center": [10, 20]}, "text")
+    trace = agent.trace()
+    stages = {t["stage"]: t for t in trace["device_timings"]}
+    assert not stages["input.text"]["success"] and not stages["action.total"]["success"]
+    assert stages["input.focus"]["success"] and stages["input.keyboard_wait"]["success"]
+    assert all(t["duration_ms"] >= 0 and "started_at" not in t for t in trace["device_timings"])
+    assert not device.timings and len(agent.trace()["device_timings"]) == len(trace["device_timings"])
 
 
 def test_optional_tree_probe_does_not_run_slow_recovery(monkeypatch):

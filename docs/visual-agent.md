@@ -74,7 +74,11 @@ Mobilerun 的 `click(1)` 在本工程对应这样的结构化动作，并不执�
 
 CLICK 和 LONG_PRESS 可以选择 index 或 point，不能同时给出。TYPE_TEXT 可以选择可编辑控件的 index，此时 current_text 从该控件快照自动获取；模型若另外提供了冲突现值会被拒绝。省略 index/point 的已聚焦输入仍要求 current_text。编号从 1 开始，不使用 -1 表示焦点输入。
 
-编号在解析时绑定当前编号表指纹，原生 bounds 决定实际操作位置；它不是 Portal/Mobilerun 的原始编号，也不是跨页面稳定标识。执行编号动作前重新读取截图和 A11Y，检查窗口、屏幕尺寸及编号表是否一致。即使窗口没变，同一个编号换了目标、位置或现值，也丢弃动作并重新观察决策。未影响编号表的非交互文本变化或像素动画本身不会使编号失效。模型调用轨迹保存当前元素表，动作历史保存实际 index、标签、bounds 和绑定指纹。
+编号在解析时绑定当前编号表指纹，原生 bounds 决定实际操作位置；它不是 Portal/Mobilerun 的原始编号，也不是跨页面稳定标识。执行编号动作前轻量读取默认显示的窗口/逻辑尺寸 → A11Y 表 → 再核对窗口/尺寸，不再重复截图、缩放或编码。窗口或尺寸变化、同一编号换了目标/位置/现值，都丢弃动作并重新观察。未影响编号表的非交互文本或像素动画不会使编号失效。模型调用轨迹保存当前元素表，动作历史保存实际 index、标签、bounds 和绑定指纹。
+
+窗口与尺寸来自过滤后的 dumpsys window displays 默认显示块；cur 是当前逻辑尺寸，不能用固定 wm size 猜测横竖屏。[AOSP DisplayContent 实现](https://android.googlesource.com/platform/frameworks/base/+/f163ffe1a33775ced2526c13a10dafe74c355d56/services/core/java/com/android/server/wm/DisplayContent.java)。厂商输出无法解析时保留完整视觉守卫作为安全回退，并记录 guard.index.fallback；树读取失败直接拒绝编号动作。
+
+设备阶段耗时保存在 trace.device_timings，含 stage、elapsed_ms、duration_ms、success、phase。覆盖截图、图片处理、窗口读取、A11Y、编号守卫，以及输入聚焦、键盘等待、输入法检查、文字传输和等待；失败阶段也记录。startup 表示运行计时开始前的观察。total 包含下属阶段时间，不能把嵌套阶段相加当总耗时；快速观察的并行读取阶段也不能简单相加。
 
 无效、布尔、字符串、负数、不存在的编号和不匹配的输入目标均不执行。A11Y 是附加信息：优先查询现有 Portal，之后最多尝试一次 uiautomator 流式 dump；失败后在当前 Device 实例内停用后续探测并记录 a11y_error，保留截图与坐标操作，避免每轮重复慢重试。重新创建 Device（CLI 重跑任务）会重新尝试。编号动作的执行前复读有额外开销，Portal 可减少此开销。
 

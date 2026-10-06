@@ -12,6 +12,7 @@ import re
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from typing import Any, Dict, List, Optional, Tuple
 from xml.etree.ElementTree import ParseError
 
@@ -80,6 +81,7 @@ class Device:
         self._portal_keyboard: Optional[bool] = None
         self._saved_ime: Optional[str] = None
         self._visual_a11y_error: Optional[str] = None
+        self.timings = []
         if prepare_portal:
             try:
                 self._ensure_portal_started()
@@ -88,6 +90,22 @@ class Device:
                 self._portal_usable = False
 
     # -- shell helpers ----------------------------------------------------
+
+    @contextmanager
+    def _timed(self, stage):
+        started, success = time.perf_counter(), False
+        try:
+            yield
+            success = True
+        finally:
+            if not hasattr(self, "timings"):
+                self.timings = []
+            self.timings.append({"stage": stage, "started_at": started,
+                                 "duration_ms": round((time.perf_counter() - started) * 1000), "success": success})
+
+    def _measure(self, stage, function, *args, **kwargs):
+        with self._timed(stage):
+            return function(*args, **kwargs)
 
     def _run(self, *args: Any, text: bool = True) -> subprocess.CompletedProcess:
         cmd = [self.adb_path]
@@ -130,9 +148,9 @@ class Device:
         # Tree, focus, and screenshot are independent reads; run them concurrently so
         # one observation costs the slowest read, not the sum of all three.
         with ThreadPoolExecutor(max_workers=3) as pool:
-            tree_future = pool.submit(self._read_tree)
-            focus_future = pool.submit(self._focus_app_activity)
-            shot_future = pool.submit(self._screencap_bytes) if screenshot else None
+            tree_future = pool.submit(self._measure, "observe.a11y", self._read_tree)
+            focus_future = pool.submit(self._measure, "observe.focus", self._focus_app_activity)
+            shot_future = pool.submit(self._measure, "observe.screenshot", self._screencap_bytes) if screenshot else None
             elements, phone_state, source = tree_future.result()
             app, activity = focus_future.result()
         state = snapshot_state(elements, {"app": app, "activity": activity}, source, self.screen)
@@ -149,19 +167,23 @@ class Device:
 
     def observe_visual(self) -> Dict[str, Any]:
         """Observe pixels with optional indexed A11Y; a failed tree cannot block recovery."""
-        image = self._screencap_bytes()
+        with self._timed("observe_visual.total"):
+            return self._observe_visual()
+
+    def _observe_visual(self):
+        image = self._measure("observe_visual.screenshot", self._screencap_bytes)
         try:
-            prepared = visual_images.prepare(image)
+            prepared = self._measure("observe_visual.image_prepare", visual_images.prepare, image)
         except (OSError, ValueError) as error:
             raise RuntimeError("Cannot prepare visual screenshot: %s" % error) from None
         self.screen = tuple(prepared["screen"])
-        app, activity = self._focus_app_activity()
+        app, activity = self._measure("observe_visual.focus", self._focus_app_activity)
         elements, tree_source = [], None
         error = getattr(self, "_visual_a11y_error", None)
         if not error:
             try:
-                elements, _, tree_source = self._read_tree(attempts=1)
-                if self._focus_app_activity() != (app, activity):
+                elements, _, tree_source = self._measure("observe_visual.a11y", self._read_tree, attempts=1)
+                if self._measure("observe_visual.confirm_focus", self._focus_app_activity) != (app, activity):
                     elements, tree_source = [], None
                     error = "Window changed while reading A11Y; indexes unavailable for this image"
             except (OSError, RuntimeError, ValueError, ParseError) as failure:
@@ -177,15 +199,42 @@ class Device:
 
     def fresh_index(self, page: Dict[str, Any]) -> bool:
         """A number belongs to one semantic snapshot, not to a screen across time."""
-        fresh = self.observe_visual()
-        return bool(page.get("a11y_fingerprint") and fresh.get("a11y_fingerprint")
-                    and all(fresh.get(k) == page.get(k) for k in
-                            ("app", "activity", "screen", "a11y_fingerprint")))
+        with self._timed("guard.index.total"):
+            if not page.get("a11y_fingerprint") or getattr(self, "_visual_a11y_error", None):
+                return False
+            try:
+                window = self._measure("guard.index.window", self._index_window)
+                if window is None:
+                    # OEM dumps can omit geometry. Preserve the full guard rather
+                    # than guessing rotation from cached wm size.
+                    fresh = self._measure("guard.index.fallback", self.observe_visual)
+                    return bool(fresh.get("a11y_fingerprint") and all(fresh.get(k) == page.get(k) for k in
+                                ("app", "activity", "screen", "a11y_fingerprint")))
+                app, activity, screen = window
+                if (app, activity) != (page["app"], page["activity"]) or list(screen) != list(page["screen"]):
+                    return False
+                elements, _, _ = self._measure("guard.index.a11y", self._read_tree, attempts=1)
+                current = snapshot_state(elements, {"app": app, "activity": activity}, "vision", screen)
+                return (fingerprint({**current, "text": ""}) == page["a11y_fingerprint"]
+                        and self._measure("guard.index.confirm_window", self._index_window) == window)
+            except (OSError, RuntimeError, ValueError, ParseError):
+                return False
+
+    def _index_window(self):
+        result = self._shell("dumpsys window displays | grep -E 'Display: mDisplayId=|cur=|mCurrentFocus='")
+        block = re.search(r"Display: mDisplayId=0\b(.*?)(?=Display: mDisplayId=|\Z)",
+                          result.stdout or "", re.DOTALL) if result.returncode == 0 else None
+        if block:
+            size = re.search(r"\bcur=(\d+)x(\d+)", block[1])
+            focus = re.search(r"mCurrentFocus=Window\{[^}]*\s(\S+)/(\S+?)(?:\s|\})", block[1])
+            if size and focus and all(int(n) > 1 for n in size.groups()):
+                return focus[1], focus[2], tuple(int(n) for n in size.groups())
+        return None
 
     def activity_changed(self, page: Dict[str, Any]) -> bool:
         """Cheap guard: the focused window differs from the observed one."""
         try:
-            return self._focus_app_activity() != (page["app"], page["activity"])
+            return self._measure("guard.focus", self._focus_app_activity) != (page["app"], page["activity"])
         except RuntimeError:
             return False
 
@@ -293,6 +342,10 @@ class Device:
     # -- execution --------------------------------------------------------
 
     def act(self, action: Dict[str, Any], text: Optional[str] = None) -> None:
+        with self._timed("action.total"):
+            self._act(action, text)
+
+    def _act(self, action, text):
         kind = action["kind"]
         if kind == "click":
             self._tap(action["center"])
@@ -303,10 +356,10 @@ class Device:
             self._checked("shell", "input", "swipe", *action["start"], *action["end"], action.get("duration_ms", SCROLL_SWIPE_MS))
         elif kind == "fill":
             if "center" in action:
-                self._tap(action["center"])
-            self._wait_keyboard()
-            self._send_text(text or "", delete=len(str(action.get("value") or "")))
-            time.sleep(TYPE_SETTLE_S)
+                self._measure("input.focus", self._tap, action["center"])
+            self._measure("input.keyboard_wait", self._wait_keyboard)
+            self._measure("input.text", self._send_text, text or "", delete=len(str(action.get("value") or "")))
+            self._measure("input.settle", time.sleep, TYPE_SETTLE_S)
         elif kind == "scroll":
             self._swipe_scroll(action["center"], action["direction"])
         elif kind == "key":
@@ -325,7 +378,7 @@ class Device:
             raise ValueError("Unsupported action kind: %r" % kind)
         if self.last_source != "uiautomator":
             # The portal read is fast; give animations a moment before the next observation.
-            time.sleep(PORTAL_SETTLE_S)
+            self._measure("action.settle", time.sleep, PORTAL_SETTLE_S)
 
     def launch(self, package: str) -> None:
         if not isinstance(package, str) or not re.fullmatch(r"[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)+", package):
@@ -374,7 +427,7 @@ class Device:
             time.sleep(0.1)
 
     def _send_text(self, text: str, delete: int = 0) -> None:
-        if self._portal_keyboard_ready():
+        if self._measure("input.portal_ime", self._portal_keyboard_ready):
             # One round trip; the endpoint clears the field itself before typing.
             encoded = base64.b64encode(text.encode("utf-8")).decode("ascii")
             for uri in PORTAL_KEYBOARD_URIS:
@@ -382,7 +435,7 @@ class Device:
                 if res.returncode == 0 and "Error" not in (res.stdout or "") + (res.stderr or ""):
                     return
             raise RuntimeError("Portal keyboard input failed; nothing typed.")
-        if self._use_adb_keyboard():
+        if self._measure("input.adb_ime", self._use_adb_keyboard):
             self._delete_chars(delete)
             escaped = text.replace("'", "'\\''")
             self._checked("shell", "am broadcast -a ADB_INPUT_TEXT --es msg '%s'" % escaped)
