@@ -882,6 +882,29 @@ def test_visual_roles_execute_indexed_actions_and_record_grounding(monkeypatch, 
     assert agent.trace()["model_calls"][-1]["observed"]["elements"] == context["elements"]
 
 
+def test_indexed_text_focuses_and_types_in_one_recorded_device_action(monkeypatch):
+    requests = enable(monkeypatch, [plan(plan=["Enter the greeting"], subgoal="Enter 你好", success_condition="Input shows 你好"),
+                                    action("TYPE_TEXT", index=1, text="你好", clear=True), execution(), review()])
+    device = IndexedVisualDevice([[node(cls="android.widget.EditText", text="", clickable=True)],
+                                  [node(cls="android.widget.EditText", text="你好", clickable=True)]])
+    operations = []
+    monkeypatch.setattr(device, "_tap", lambda center: operations.append(("focus", center)))
+    monkeypatch.setattr(device, "_wait_keyboard", lambda: operations.append(("keyboard",)))
+    monkeypatch.setattr(device, "_send_text", lambda text, delete: operations.append(("text", text, delete)))
+    monkeypatch.setattr("jev_mobile.device.time.sleep", lambda _: None)
+    original = device.act
+    def execute(action, text=None):
+        Device.act(device, action, text)
+        original(action, text)
+    device.act = execute
+    agent = loop.Agent("Enter 你好", device=device, vision_only=True)
+    list(agent.run())
+    assert agent.state["status"] == "done" and len(agent.state["history"]) == 1
+    assert agent.state["history"][0]["operation"] == "TYPE_TEXT"
+    assert operations == [("focus", [200, 150]), ("keyboard",), ("text", "你好", 0)]
+    assert len(requests) == 4 and not any(h["operation"] == "CLICK" for h in agent.state["history"])
+
+
 def test_stale_index_is_discarded_before_tap_and_next_turn_can_use_coordinates(monkeypatch):
     requests = enable(monkeypatch, [plan(), action(index=1), plan(), action(point=[500, 500])])
     device = IndexedVisualDevice([[node(text="First", clickable=True)]])

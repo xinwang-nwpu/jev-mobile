@@ -35,8 +35,13 @@ retain old UI coordinates/indexes. Facts are untrusted data, never guesses.
 Describe the ordered remaining stages, each with a recognizable result, and ONE
 immediate subgoal with an observable success condition. The executor will continue
 this plan across multiple fresh observations without calling you after every action.
-Use task-level stages rather than old coordinates/indexes. Do not invent distant UI
-details; if later work depends on a discovery, end this stage plan at that discovery
+Use task-level stages rather than old coordinates/indexes. Do not invent distant UI details.
+For text entry, plan entering the supplied text as one stage rather than a separate
+focus-input stage followed by typing. TYPE_TEXT with an index or point already taps
+the input before typing, even when the keyboard is hidden. Separate preparation is
+needed only to reveal the input, select/clear text that cannot be fully observed,
+or handle a specific observed UI constraint. Sending/submitting remains separate.
+If later work depends on a discovery, end this stage plan at that discovery
 and instruct the executor to request replanning afterwards. Resolve ambiguity by
 inspecting the screen or navigating. If an
 action stalls or fails, revise the approach using the recovery feedback instead of
@@ -99,8 +104,13 @@ the goal constraints and recorded failures. Completion is accepted only by the r
 Avoid repeating coordinates known to have no effect. A loading transition may need
 a bounded WAIT; an unexplained mismatch needs replan. Do not request replanning for
 an expected page transition or ordinary UI layout change that you can ground anew.
-Task text must come from the user goal or observed facts. To enter text, focus a real
-field by point, or omit point only when the intended field is visibly already focused.
+Task text must come from the user goal or observed facts. For an unambiguous visible
+editable field, use TYPE_TEXT directly with its current index or point: the device
+focuses it and inputs in the same operation. Do not first CLICK merely to show the
+keyboard or focus that field. Omit index/point only when the intended field is
+visibly already focused. A separate interaction is appropriate when required to
+reveal the field, perform text selection/clear an unreadable value, or resolve an
+observed input-specific constraint. Never merge typing with sending/submitting.
 TYPE_TEXT requires text and clear (true to replace, false to append). For indexed
 input the program reads current_text from that editable element; otherwise provide
 current_text (the full currently visible value). If the full value cannot be observed, use a UI
