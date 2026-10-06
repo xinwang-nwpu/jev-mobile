@@ -3,8 +3,8 @@
     python -m jev_mobile                     # reads config.yaml (CWD or package root)
     python -m jev_mobile --task "..."        # CLI flags override the file
 
-Credentials come from the environment or a local .env file. TYPESAFE_API_KEY is
-required; TEXT_MODEL_API_KEY is required only when the agent types text.
+Credentials come from the environment or a local .env file. Fast mode needs Jev;
+vision-only mode needs the visual model key/name and generates its own field text.
 """
 
 import argparse
@@ -60,12 +60,36 @@ def format_event(event: Dict) -> str:
         return line
     if kind == "stale_done":
         return "%s DONE 被拒绝：决策后屏幕已变化，重新观察" % elapsed
+    if kind == "handoff":
+        return "%s 切换到视觉 Agent：%s" % (elapsed, event["reason"])
+    if kind == "visual_decision":
+        return "%s 视觉决策 %s  %s  %dms  %s" % (
+            elapsed, event["operation"], event["model"], event["latency_ms"], event.get("reason") or "")
+    if kind == "visual_plan":
+        return "%s 视觉规划：%s · %s" % (elapsed, event["summary"], event["subgoal"])
+    if kind == "visual_progress":
+        return "%s 视觉进度 %d/%d：%s" % (elapsed, event["completed"], event["total"], event["summary"])
+    if kind == "visual_review":
+        return "%s 完成复核 %s：%s" % (elapsed, event["status"], event["reason"])
+    if kind == "visual_retry":
+        line = "%s 视觉 %s 请求失败（第 %d 次）：%s" % (elapsed, event["role"], event["attempt"], event["error"])
+        if "retry_action" in event:
+            adjustments = {"repair_json": "修正 JSON", "retry_request": "重试请求", "disable_reasoning": "关闭思考后重试",
+                           "increase_output_limit": "提高输出预算后重试", "stop": "停止重试"}
+            line += " · finish=%s 思考tokens=%s 输出上限=%s · %s" % (
+                event.get("finish_reason"), event.get("reasoning_tokens"), event.get("max_tokens"),
+                adjustments.get(event["retry_action"], event["retry_action"]))
+        return line
+    if kind == "visual_replan":
+        return "%s 视觉恢复重规划 %s：%s" % (elapsed, event["kind"], event["message"])
     if kind == "done_vetoed":
         return "%s DONE 被目标判定否决（未达成，等待后重判）goal=%.2f" % (elapsed, event.get("goal_probability") or 0.0)
     if kind == "goal_done":
         return "%s 目标判定已达成，结束（操作头仍想行动）goal=%.2f" % (elapsed, event.get("goal_probability") or 0.0)
     if kind == "stuck":
         return "%s 判定卡住：连续 3 步无变化 → blocked" % elapsed
+    if kind == "cycle":
+        return "%s 检测到循环：反复点击 %s，页面在两个状态间切换 → blocked" % (elapsed, event.get("action", ""))
     if kind == "reobserve":
         return "%s 焦点窗口变化，重新观察" % elapsed
     return "%s %s" % (elapsed, kind)
@@ -73,16 +97,19 @@ def format_event(event: Dict) -> str:
 
 def format_step(step: Dict, quiet: bool) -> str:
     elapsed = "[%6.1fs]" % (step["elapsed_ms"] / 1000)
+    operation = ("视觉 " if step.get("mode") == "vision" else "") + step["operation"]
     if quiet:
-        parts = [elapsed, step["operation"]]
+        parts = [elapsed, operation]
         if step["target"]:
             parts.append("[%s]" % step["target"])
         parts.append(step["action"])
         if step["text"]:
             parts.append("text=%r" % step["text"])
         parts.append("changed=%s" % step["page_changed"])
+        if step.get("success") is False:
+            parts.append("failed=%s" % step.get("error"))
         return " ".join(str(p) for p in parts)
-    parts = [elapsed, step["operation"]]
+    parts = [elapsed, operation]
     if step["target"]:
         parts.append("[%s]" % step["target"])
     parts.append(step["action"])
@@ -90,6 +117,8 @@ def format_step(step: Dict, quiet: bool) -> str:
         note = "(%s %dms)" % (step["text_helper"], step["text_latency_ms"]) if step["text_helper"] else ""
         parts.append("text=%r %s" % (step["text"], note.strip()))
     parts.append("changed=%s" % step["page_changed"])
+    if step.get("success") is False:
+        parts.append("failed=%s" % step.get("error"))
     activity = step.get("activity") or ""
     if activity and activity != step.get("activity_before"):
         parts.append("→ %s" % activity.rsplit(".", 1)[-1])
@@ -104,9 +133,13 @@ def format_summary(state: Dict, quiet: bool) -> str:
         len(decisions),
         state["elapsed_ms"] / 1000,
     )
-    if not quiet and decisions:
-        latencies = [d["latency_ms"] for d in decisions]
-        line += "  决策均值 %dms" % (sum(latencies) // len(latencies))
+    calls = state.get("model_calls", decisions)
+    if "model_calls" in state:
+        line += " requests=%d" % len(calls)
+    if not quiet and calls:
+        latencies = [d.get("latency_ms", 0) for d in calls]
+        label = "模型请求" if "model_calls" in state else "决策"
+        line += "  %s均值 %dms" % (label, sum(latencies) // len(latencies))
         text_calls = state["text_calls"]
         if text_calls:
             text_ms = sum(t["latency_ms"] for t in text_calls)
@@ -151,7 +184,7 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--no-screenshots",
         action="store_true",
-        help="Skip screenshots even when recording; each screencap costs ~1s per step.",
+        help="Skip fast-path screenshots; visual recovery still requires screenshots.",
     )
     parser.add_argument(
         "--action-interval",
@@ -160,6 +193,8 @@ def main(argv=None) -> int:
         help="Extra seconds to wait after each executed action; overrides config.yaml.",
     )
     parser.add_argument("--quiet", action="store_true", help="One line per action, no decision details.")
+    parser.add_argument("--no-vision-fallback", action="store_true", help="Disable screenshot-based recovery.")
+    parser.add_argument("--vision-only", action="store_true", help="Use visual planning/execution from the first observation; no Jev key needed.")
     args = parser.parse_args(argv)
 
     load_env_file()
@@ -172,7 +207,8 @@ def main(argv=None) -> int:
     if not task:
         print("No task: set `task` in config.yaml or pass --task.", file=sys.stderr)
         return 1
-    if not os.environ.get("TYPESAFE_API_KEY"):
+    vision_only = args.vision_only or config["vision_only"]
+    if not vision_only and not os.environ.get("TYPESAFE_API_KEY"):
         print("TYPESAFE_API_KEY is missing; set it in the environment or .env.", file=sys.stderr)
         return 1
 
@@ -185,15 +221,21 @@ def main(argv=None) -> int:
         screenshots = True
     else:
         screenshots = None  # recording decides
-    agent = Agent(
-        task,
-        adb_path=args.adb_path or config["adb_path"] or None,
-        serial=args.device or config["device"],
-        start_package=args.start_package or config["start_package"],
-        record_dir=record_dir,
-        screenshots=screenshots,
-        action_interval=interval,
-    )
+    try:
+        agent = Agent(
+            task,
+            adb_path=args.adb_path or config["adb_path"] or None,
+            serial=args.device or config["device"],
+            start_package=args.start_package or config["start_package"],
+            record_dir=record_dir,
+            screenshots=screenshots,
+            action_interval=interval,
+            vision_fallback=config["vision_fallback"] and not args.no_vision_fallback,
+            vision_only=vision_only,
+        )
+    except (OSError, RuntimeError, ValueError) as error:
+        print("Cannot start run: %s" % error, file=sys.stderr)
+        return 1
     last_step = 0
     last_event = 0
     try:
@@ -223,6 +265,8 @@ def main(argv=None) -> int:
     print(format_tokens(state))
     if not quiet:
         print(final_page_line(state))
+    if state.get("answer"):
+        print("answer: " + state["answer"])
     return 0 if status == "done" else 1
 
 

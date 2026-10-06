@@ -230,13 +230,42 @@ def _flatten(elements: Iterable[Any]) -> List[Dict[str, Any]]:
     def visit(node: Any) -> None:
         if len(flat) >= MAX_ELEMENTS or not isinstance(node, dict):
             return
-        flat.append({k: v for k, v in node.items() if k != "children"})
+        item = {k: v for k, v in node.items() if k != "children"}
+        if _flag(node, "clickable") and not _editable(node):
+            item["_descendant_label"] = _descendant_label(node)
+        flat.append(item)
         for child in node.get("children") or []:
             visit(child)
 
     for element in elements or []:
         visit(element)
     return flat
+
+
+def _descendant_label(node: Dict[str, Any]) -> str:
+    """Keep a container's visible child text attached to its click target."""
+    parent_bounds = parse_bounds(node.get("bounds"))
+    if not parent_bounds:
+        return ""
+    texts: List[str] = []
+    pending = list(reversed(node.get("children") or []))
+    inspected = 0
+    while pending and inspected < MAX_ELEMENTS and len(texts) < 3:
+        child = pending.pop()
+        inspected += 1
+        if not isinstance(child, dict):
+            continue
+        bounds = parse_bounds(child.get("bounds"))
+        if not bounds or bounds[2] <= bounds[0] or bounds[3] <= bounds[1]:
+            continue
+        if (bounds[0] >= parent_bounds[2] or bounds[1] >= parent_bounds[3]
+                or bounds[2] <= parent_bounds[0] or bounds[3] <= parent_bounds[1]):
+            continue
+        text = str(child.get("text") or child.get("contentDescription") or "").strip()
+        if text and text not in texts:
+            texts.append(text)
+        pending.extend(reversed(child.get("children") or []))
+    return " · ".join(texts)[:MAX_LABEL_CHARS]
 
 
 def _visible_nodes(nodes: Sequence[Dict[str, Any]], screen: Tuple[int, int]) -> List[Dict[str, Any]]:
@@ -268,7 +297,8 @@ def _label(el: Dict[str, Any]) -> str:
     if _editable(el):
         source = desc or _short_resource(el.get("resourceId"))
     else:
-        source = str(el.get("text") or "").strip() or desc or _short_resource(el.get("resourceId"))
+        source = (str(el.get("text") or "").strip() or desc
+                  or el.get("_descendant_label") or _short_resource(el.get("resourceId")))
     return (source or _short_class(el.get("className")))[:MAX_LABEL_CHARS]
 
 

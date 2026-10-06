@@ -131,6 +131,7 @@ def test_hidden_events_have_lines():
     assert "DONE 被拒绝" in format_event({"type": "stale_done", "elapsed_ms": 1000})
     assert "判定卡住" in format_event({"type": "stuck", "elapsed_ms": 1000})
     assert "焦点窗口变化" in format_event({"type": "reobserve", "elapsed_ms": 1000, "reason": "focus_changed"})
+    assert "默认排序" in format_event({"type": "cycle", "elapsed_ms": 1000, "action": "默认排序"})
 
 
 def test_goal_gate_events_have_lines():

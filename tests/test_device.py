@@ -72,13 +72,33 @@ def test_flagless_portal_falls_back_to_uiautomator(monkeypatch):
 
 def test_uiautomator_file_fallback_when_dev_tty_refuses(monkeypatch):
     device = bare_device(monkeypatch, (FLAGLESS_PORTAL, {}, "mobilerun_portal"))
-    run, calls = fake_run(["ERROR: could not get idle state.", UIA_XML])
+    run, calls = fake_run(["ERROR: could not get idle state.", "", UIA_XML])
     monkeypatch.setattr(device, "_run", run)
     _, _, source = device._read_tree()
     assert source == "uiautomator"
+    # An empty dump clears a possibly stuck uiautomator before the retry.
+    assert "pkill uiautomator" in " ".join(str(a) for a in calls[1])
     # The fallback dumps to a file and returns it in a single combined shell command.
-    fallback = " ".join(str(a) for a in calls[1])
+    fallback = " ".join(str(a) for a in calls[2])
     assert "cat" in fallback and "rm -f" in fallback
+
+
+def test_dump_failure_reports_device_reason_and_display_state(monkeypatch):
+    import pytest
+
+    monkeypatch.setattr(device_module.time, "sleep", lambda s: None)
+    device = bare_device(monkeypatch, (FLAGLESS_PORTAL, {}, "mobilerun_portal"))
+    outputs = []
+    for _ in range(3):  # tty dump, pkill, file fallback — all returning nothing useful.
+        outputs += ["ERROR: could not get idle state.", "", ""]
+    outputs.append("  mWakefulness=Asleep")
+    run, calls = fake_run(outputs)
+    monkeypatch.setattr(device, "_run", run)
+    with pytest.raises(RuntimeError) as exc:
+        device._read_tree()
+    # The device's own reason and the display state end up in the error, not a generic message.
+    assert "could not get idle state" in str(exc.value)
+    assert "display=Asleep" in str(exc.value)
 
 
 def test_flagged_portal_is_used_without_uiautomator(monkeypatch):
@@ -96,6 +116,69 @@ def test_portal_state_full_uri_is_preferred():
     uris = [uri for _, uri in PORTAL_STATE_URIS]
     assert uris.index("content://com.mobilerun.portal/state_full") < uris.index("content://com.mobilerun.portal/state")
     assert "content://com.droidrun.portal/state_full" in uris
+
+
+def test_portal_ime_is_switched_when_not_current(monkeypatch):
+    device = bare_device(monkeypatch, None)
+    calls = []
+
+    def fake_run(*args, text=True):
+        joined = " ".join(str(a) for a in args)
+        calls.append(joined)
+        if "dumpsys" in joined:
+            return subprocess.CompletedProcess(args=list(args), returncode=0, stdout="mCurMethodId=com.baidu.input_oppo/.ImeService", stderr="")
+        if "ime" in joined and "list" in joined:
+            return subprocess.CompletedProcess(args=list(args), returncode=0, stdout="com.mobilerun.portal/.input.MobilerunKeyboardIME", stderr="")
+        if "settings" in joined:
+            return subprocess.CompletedProcess(args=list(args), returncode=0, stdout="com.baidu.input_oppo/.ImeService", stderr="")
+        return subprocess.CompletedProcess(args=list(args), returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(device, "_run", fake_run)
+    monkeypatch.setattr(device, "_shell", lambda cmd: fake_run("shell", cmd))
+    device._send_text("龙卷风", delete=0)
+    # The portal IME is installed but not bound, so it is switched to before inserting.
+    assert any("ime set com.mobilerun.portal" in c for c in calls)
+    inserts = [c for c in calls if c.startswith("shell content insert")]
+    assert len(inserts) == 1 and "keyboard/input" in inserts[0]
+    # The user's original IME is remembered for close() to restore.
+    assert device._saved_ime == "com.baidu.input_oppo/.ImeService"
+
+
+def test_stopped_portal_app_is_launched_once(monkeypatch):
+    monkeypatch.setattr(device_module.time, "sleep", lambda s: None)
+    device = bare_device(monkeypatch, None)
+    calls = []
+
+    def fake_run(*args, text=True):
+        joined = " ".join(str(a) for a in args)
+        calls.append(joined)
+        if "pm list" in joined:
+            return subprocess.CompletedProcess(args=list(args), returncode=0, stdout="package:com.mobilerun.portal\n", stderr="")
+        if "content" in joined and "query" in joined:
+            return subprocess.CompletedProcess(args=list(args), returncode=1, stdout="", stderr="Error while accessing provider")
+        return subprocess.CompletedProcess(args=list(args), returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(device, "_run", fake_run)
+    monkeypatch.setattr(device, "_shell", lambda cmd: fake_run("shell", cmd))
+    device._ensure_portal_started()
+    # The provider is invisible while the app is in the stopped state; launching it once wakes it.
+    assert any("monkey" in c and "com.mobilerun.portal" in c for c in calls)
+
+
+def test_no_portal_launch_when_provider_responds(monkeypatch):
+    device = bare_device(monkeypatch, (FLAGGED_PORTAL, {}, "mobilerun_portal"))
+    calls = []
+
+    def fake_run(*args, text=True):
+        joined = " ".join(str(a) for a in args)
+        calls.append(joined)
+        stdout = "package:com.mobilerun.portal\n" if "pm list" in joined else ""
+        return subprocess.CompletedProcess(args=list(args), returncode=0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(device, "_run", fake_run)
+    monkeypatch.setattr(device, "_shell", lambda cmd: fake_run("shell", cmd))
+    device._ensure_portal_started()
+    assert not any("monkey" in c for c in calls)
 
 
 def test_portal_keyboard_input_is_the_preferred_path(monkeypatch):

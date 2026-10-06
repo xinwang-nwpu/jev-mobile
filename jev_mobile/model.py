@@ -8,6 +8,7 @@ import json
 import math
 import os
 import time
+from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
@@ -16,16 +17,19 @@ from .questions import GOAL_ACHIEVED, NEXT_ACTION, TARGET, TEXT_VALUE
 
 # trust_env=False: system/registry proxies observed breaking the TLS handshake to this
 # endpoint; the API is reachable directly and credentials never need the proxy.
-CLIENT = httpx.Client(http2=True, timeout=25, trust_env=False)
+@lru_cache(maxsize=1)
+def _client():
+    return httpx.Client(http2=True, timeout=25, trust_env=False)
 
 # The goal gate accepts "achieved" at simple majority.
 GOAL_THRESHOLD = 0.5
 
 
-def post_json(url, key, body):
+def post_json(url, key, body, *, timeout=None):
     for attempt in range(3):
         try:
-            response = CLIENT.post(url, json=body, headers={"Authorization": "Bearer %s" % key})
+            options = {"timeout": timeout} if timeout is not None else {}
+            response = _client().post(url, json=body, headers={"Authorization": "Bearer %s" % key}, **options)
         except httpx.HTTPError:
             raise RuntimeError("Model connection failed; no action executed.") from None
         if response.status_code in {429, 529, 503} and attempt < 2:

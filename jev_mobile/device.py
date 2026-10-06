@@ -13,9 +13,13 @@ import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional, Tuple
+from xml.etree.ElementTree import ParseError
+
+from . import visual_images
 
 from .a11y import (
     PORTAL_STATE_URIS,
+    fingerprint,
     normalize_tree,
     parse_content_provider_output,
     parse_uiautomator_xml,
@@ -25,6 +29,7 @@ from .a11y import (
 ADB_KEYBOARD = "com.android.adbkeyboard/.AdbIME"
 # The portal's own IME serves the keyboard/input insert endpoint through its live
 # InputConnection, so text works even where the shell `ime` command is disabled.
+PORTAL_PACKAGES = ("com.mobilerun.portal", "com.droidrun.portal")
 PORTAL_IME_PREFIXES = ("com.mobilerun.portal/", "com.droidrun.portal/")
 PORTAL_KEYBOARD_URIS = (
     "content://com.mobilerun.portal/keyboard/input",
@@ -66,7 +71,7 @@ def _extract_xml(output: str) -> str:
 
 
 class Device:
-    def __init__(self, adb_path: Optional[str] = None, device: Optional[str] = None):
+    def __init__(self, adb_path: Optional[str] = None, device: Optional[str] = None, *, prepare_portal: bool = True):
         self.adb_path = adb_path or os.environ.get("ADB_PATH", "adb")
         self.device = device or os.environ.get("ANDROID_DEVICE") or None
         self.screen = self._read_screen()
@@ -74,6 +79,13 @@ class Device:
         self._portal_usable: Optional[bool] = None
         self._portal_keyboard: Optional[bool] = None
         self._saved_ime: Optional[str] = None
+        self._visual_a11y_error: Optional[str] = None
+        if prepare_portal:
+            try:
+                self._ensure_portal_started()
+            except RuntimeError:
+                # Portal is an optional accelerator; a failed probe must not prevent recovery.
+                self._portal_usable = False
 
     # -- shell helpers ----------------------------------------------------
 
@@ -82,17 +94,27 @@ class Device:
         if self.device:
             cmd.extend(["-s", self.device])
         cmd.extend(str(arg) for arg in args)
-        return subprocess.run(
-            cmd,
-            capture_output=True,
-            text=text,
-            encoding="utf-8" if text else None,
-            errors="replace" if text else None,
-            check=False,
-        )
+        try:
+            return subprocess.run(
+                cmd,
+                capture_output=True,
+                text=text,
+                encoding="utf-8" if text else None,
+                errors="replace" if text else None,
+                check=False,
+                timeout=30,
+            )
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("ADB command timed out after 30 seconds") from None
 
     def _shell(self, command: str) -> subprocess.CompletedProcess:
         return self._run("shell", command)
+
+    def _checked(self, *args):
+        result = self._run(*args)
+        if result.returncode != 0:
+            raise RuntimeError("ADB operation failed (exit %d)" % result.returncode)
+        return result
 
     def _read_screen(self) -> Tuple[int, int]:
         res = self._shell("wm size")
@@ -125,6 +147,41 @@ class Device:
         """Full semantic comparison; used before accepting DONE or BLOCKED."""
         return self.observe()["fingerprint"] == page["fingerprint"]
 
+    def observe_visual(self) -> Dict[str, Any]:
+        """Observe pixels with optional indexed A11Y; a failed tree cannot block recovery."""
+        image = self._screencap_bytes()
+        try:
+            prepared = visual_images.prepare(image)
+        except (OSError, ValueError) as error:
+            raise RuntimeError("Cannot prepare visual screenshot: %s" % error) from None
+        self.screen = tuple(prepared["screen"])
+        app, activity = self._focus_app_activity()
+        elements, tree_source = [], None
+        error = getattr(self, "_visual_a11y_error", None)
+        if not error:
+            try:
+                elements, _, tree_source = self._read_tree(attempts=1)
+                if self._focus_app_activity() != (app, activity):
+                    elements, tree_source = [], None
+                    error = "Window changed while reading A11Y; indexes unavailable for this image"
+            except (OSError, RuntimeError, ValueError, ParseError) as failure:
+                # ponytail: stop probing after a failed tree for this run; coordinates
+                # keep working without repeated slow dumps. Retry on a fresh Device.
+                error = self._visual_a11y_error = (str(failure) or type(failure).__name__)[:500]
+        page = snapshot_state(elements, {"app": app, "activity": activity}, "vision", self.screen)
+        page.update(a11y_source=tree_source, a11y_error=error,
+                    a11y_fingerprint=fingerprint({**page, "text": ""}) if tree_source else None)
+        page.update(prepared)
+        self.last_source = "vision"
+        return page
+
+    def fresh_index(self, page: Dict[str, Any]) -> bool:
+        """A number belongs to one semantic snapshot, not to a screen across time."""
+        fresh = self.observe_visual()
+        return bool(page.get("a11y_fingerprint") and fresh.get("a11y_fingerprint")
+                    and all(fresh.get(k) == page.get(k) for k in
+                            ("app", "activity", "screen", "a11y_fingerprint")))
+
     def activity_changed(self, page: Dict[str, Any]) -> bool:
         """Cheap guard: the focused window differs from the observed one."""
         try:
@@ -132,7 +189,7 @@ class Device:
         except RuntimeError:
             return False
 
-    def _read_tree(self) -> Tuple[List[Dict[str, Any]], Dict[str, Any], str]:
+    def _read_tree(self, attempts: int = 3) -> Tuple[List[Dict[str, Any]], Dict[str, Any], str]:
         if self._portal_usable is not False:
             portal = self._portal_tree()
             # A portal tree without interaction flags cannot drive CLICK/TYPE_TEXT decisions.
@@ -141,11 +198,21 @@ class Device:
             if usable:
                 return portal
         last_error = ""
-        for _ in range(3):
+        for _ in range(attempts):
             # /dev/tty streams the XML back on stdout: one round trip instead of dump+cat+rm.
-            xml = _extract_xml(self._shell("uiautomator dump /dev/tty").stdout or "")
+            res = self._shell("uiautomator dump /dev/tty")
+            xml = _extract_xml(res.stdout or "")
             if xml:
                 return parse_uiautomator_xml(xml), {}, "uiautomator"
+            # The dump always prints a reason (e.g. "could not get idle state"); keep it.
+            detail = " | ".join(s.strip() for s in (res.stdout, res.stderr) if s and s.strip())
+            if detail:
+                last_error = detail[:300]
+            if attempts == 1:
+                raise RuntimeError("Optional A11Y read failed: " + (last_error or "empty dump"))
+            # A crashed dump leaves a uiautomator process that makes every retry return
+            # empty; kill it before trying the file fallback (the standard remedy).
+            self._shell("pkill uiautomator 2>/dev/null")
             # Some builds refuse to dump to a character device; try a file, still in one round trip.
             remote = "/sdcard/jev_mobile_dump_%d.xml" % os.getpid()
             combined = self._shell(
@@ -154,9 +221,15 @@ class Device:
             xml = _extract_xml(combined.stdout or "")
             if xml:
                 return parse_uiautomator_xml(xml), {}, "uiautomator"
-            last_error = "empty uiautomator dump"
             time.sleep(0.5)
-        raise RuntimeError("Could not read the A11Y tree: %s" % last_error)
+        raise RuntimeError(
+            "Could not read the A11Y tree: %s (display=%s; the screen must be on and unlocked)"
+            % (last_error or "empty dump", self._display_state())
+        )
+
+    def _display_state(self) -> str:
+        res = self._shell("dumpsys power | grep -m1 mWakefulness")
+        return (res.stdout or "").strip().split("=")[-1] or "unknown"
 
     def _portal_tree(self) -> Optional[Tuple[List[Dict[str, Any]], Dict[str, Any], str]]:
         for source, state_uri in PORTAL_STATE_URIS:
@@ -188,6 +261,18 @@ class Device:
             return normalize_tree(tree), phone_state, source
         return None
 
+    def _ensure_portal_started(self) -> None:
+        """A freshly installed Portal sits in the stopped state, where Android hides its
+        ContentProvider entirely; launching it once makes the tree and keyboard endpoints
+        reachable for the rest of the run (and for future runs)."""
+        res = self._shell("pm list packages")
+        packages = [p for p in PORTAL_PACKAGES if p in (res.stdout or "")]
+        if not packages or self._portal_tree() is not None:
+            return
+        for package in packages:
+            self._run("shell", "monkey", "-p", package, "-c", "android.intent.category.LAUNCHER", "1")
+        time.sleep(LAUNCH_SETTLE_S)
+
     def _focus_app_activity(self) -> Tuple[str, str]:
         # The full dumpsys window output is hundreds of KB over the wire; grep on the device.
         res = self._shell("dumpsys window | grep -m1 mCurrentFocus")
@@ -211,23 +296,31 @@ class Device:
         kind = action["kind"]
         if kind == "click":
             self._tap(action["center"])
+        elif kind == "long_press":
+            x, y = action["center"]
+            self._checked("shell", "input", "swipe", x, y, x, y, action.get("duration_ms", 700))
+        elif kind == "swipe":
+            self._checked("shell", "input", "swipe", *action["start"], *action["end"], action.get("duration_ms", SCROLL_SWIPE_MS))
         elif kind == "fill":
-            self._tap(action["center"])
+            if "center" in action:
+                self._tap(action["center"])
             self._wait_keyboard()
             self._send_text(text or "", delete=len(str(action.get("value") or "")))
             time.sleep(TYPE_SETTLE_S)
         elif kind == "scroll":
             self._swipe_scroll(action["center"], action["direction"])
         elif kind == "key":
-            self._run("shell", "input", "keyevent", int(action["keycode"]))
+            self._checked("shell", "input", "keyevent", int(action["keycode"]))
         elif kind == "home":
-            self._run(
+            self._checked(
                 "shell", "am", "start",
                 "-a", "android.intent.action.MAIN",
                 "-c", "android.intent.category.HOME",
             )
         elif kind == "wait":
-            time.sleep(WAIT_S)
+            time.sleep(action.get("duration", WAIT_S))
+        elif kind == "launch":
+            self.launch(action["package"])
         else:
             raise ValueError("Unsupported action kind: %r" % kind)
         if self.last_source != "uiautomator":
@@ -235,18 +328,27 @@ class Device:
             time.sleep(PORTAL_SETTLE_S)
 
     def launch(self, package: str) -> None:
-        self._run(
+        if not isinstance(package, str) or not re.fullmatch(r"[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)+", package):
+            raise ValueError("Invalid Android package identifier")
+        result = self._checked(
             "shell", "monkey", "-p", package,
             "-c", "android.intent.category.LAUNCHER",
             "1",
         )
+        output = (result.stdout or "") + (result.stderr or "")
+        if "No activities found" in output or "Error:" in output:
+            raise RuntimeError("The installed package has no launchable activity")
         time.sleep(LAUNCH_SETTLE_S)
+
+    def list_apps(self):
+        result = self._checked("shell", "pm", "list", "packages")
+        return sorted(set(re.findall(r"^package:([A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)+)$", result.stdout or "", re.MULTILINE)))
 
     def _tap(self, center: List[int]) -> None:
         width, height = self.screen
         x = min(max(int(center[0]), 1), width - 1)
         y = min(max(int(center[1]), 1), height - 1)
-        self._run("shell", "input", "tap", x, y)
+        self._checked("shell", "input", "tap", x, y)
 
     def _swipe_scroll(self, center: List[int], direction: str) -> None:
         _, height = self.screen
@@ -258,10 +360,10 @@ class Device:
             start, end = y - span, y + span
         start = min(max(start, 1), height - 1)
         end = min(max(end, 1), height - 1)
-        self._run("shell", "input", "swipe", x, start, x, end, SCROLL_SWIPE_MS)
+        self._checked("shell", "input", "swipe", x, start, x, end, SCROLL_SWIPE_MS)
 
     def _wait_keyboard(self) -> None:
-        if self.last_source == "uiautomator":
+        if self.last_source in {"uiautomator", "vision"}:
             time.sleep(0.45)
             return
         deadline = time.monotonic() + KEYBOARD_WAIT_S
@@ -283,26 +385,50 @@ class Device:
         if self._use_adb_keyboard():
             self._delete_chars(delete)
             escaped = text.replace("'", "'\\''")
-            self._shell("am broadcast -a ADB_INPUT_TEXT --es msg '%s'" % escaped)
+            self._checked("shell", "am broadcast -a ADB_INPUT_TEXT --es msg '%s'" % escaped)
             return
         if not re.fullmatch(r"[ -~]+", text):
             raise RuntimeError("Non-ASCII text needs the Portal keyboard or ADB Keyboard installed on the device.")
         self._delete_chars(delete)
         safe = text.replace("%", "%%").replace(" ", "%s")
-        self._shell("input text '%s'" % safe.replace("'", "'\\''"))
+        self._checked("shell", "input text '%s'" % safe.replace("'", "'\\''"))
 
     def _delete_chars(self, count: int) -> None:
-        count = min(max(int(count or 0), 0), 100)
+        count = min(max(int(count or 0), 0), 2000)
         if count <= 0:
             return
         # One round trip: move the cursor to the end, then delete in place.
-        self._shell("input keyevent 123; for i in $(seq 1 %d); do input keyevent 67; done" % count)
+        self._checked("shell", "input keyevent 123; for i in $(seq 1 %d); do input keyevent 67; done" % count)
 
     def _portal_keyboard_ready(self) -> bool:
         if self._portal_keyboard is None:
             current = self._current_ime()
-            self._portal_keyboard = current.startswith(PORTAL_IME_PREFIXES)
+            # Bound already? Use it. Installed but not bound? Switch to it like the
+            # ADB Keyboard path does, so Chinese input works out of the box.
+            if current.startswith(PORTAL_IME_PREFIXES):
+                self._portal_keyboard = True
+            else:
+                self._portal_keyboard = self._switch_ime_to_portal()
         return self._portal_keyboard
+
+    def _switch_ime_to_portal(self) -> bool:
+        listed = self._run("shell", "ime", "list", "-s")
+        portal_ime = next(
+            (ime for ime in (listed.stdout or "").split() if ime.startswith(PORTAL_IME_PREFIXES)),
+            None,
+        )
+        if portal_ime is None:
+            return False
+        saved = self._shell("settings get secure default_input_method")
+        if self._run("shell", "ime", "set", portal_ime).returncode != 0:
+            # Some builds disable the shell `ime` command entirely.
+            return False
+        previous = (saved.stdout or "").strip()
+        if previous and previous != portal_ime and not self._saved_ime:
+            self._saved_ime = previous
+        # Binding can lag the command; the insert endpoint itself is the real check,
+        # so succeed here and let a failed insert raise with its own clearer message.
+        return True
 
     def _use_adb_keyboard(self) -> bool:
         if self._saved_ime is None:

@@ -25,3 +25,9 @@ action_interval: 0
 
 # 安静模式：每个动作只输出一行，不显示决策概率等细节（也可用 --quiet 临时开启）
 quiet: false
+
+# 出现问题时让视觉 Agent 接管剩余任务；需在 .env 配置 VISION_MODEL_*。
+vision_fallback: true
+
+# 从第一步开始使用视觉规划/执行/复核，不需要 Jev 或文本模型的密钥。
+vision_only: false

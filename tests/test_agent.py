@@ -77,6 +77,44 @@ class TestBasicLoop:
         assert usage["total"]["input_tokens"] == 0  # fake decisions carry no usage
 
 
+class TestClickCycles:
+    def test_repeated_click_toggling_menu_stops_even_when_page_changes(self, monkeypatch):
+        sort = node(cls="android.widget.RelativeLayout", clickable=True,
+                    children=[node(text="默认排序")])
+        closed = [sort]
+        # Adding a noninteractive node also changes the snapshot node id.
+        opened = [node(text="Menu"), sort, node(text="播放多")]
+        device = FakeDevice([closed, opened, closed, opened, closed])
+        install_script(monkeypatch, [("CLICK", "1")] * 4)
+        agent = Agent("play a video", device=device)
+        list(agent.run())
+        assert agent.state["status"] == "blocked"
+        assert len(device.acts) == 4
+        assert all(h["page_changed"] for h in agent.state["history"])
+        assert device.acts[0][0]["id"] != device.acts[1][0]["id"]
+        assert agent.state["events"][-1]["type"] == "cycle"
+
+    def test_repeated_control_advancing_through_new_pages_is_allowed(self, monkeypatch):
+        trees = [[node(text="Next", clickable=True), node(text=str(i))] for i in range(5)]
+        device = FakeDevice(trees)
+        install_script(monkeypatch, [("CLICK", "1")] * 4 + [("DONE", None)])
+        agent = Agent("finish the flow", device=device)
+        list(agent.run())
+        assert agent.state["status"] == "done"
+        assert len(device.acts) == 4
+        assert not any(e["type"] == "cycle" for e in agent.state["events"])
+
+    def test_identical_labels_on_different_controls_are_not_a_click_cycle(self, monkeypatch):
+        first = [node(text="Open", clickable=True)]
+        second = [node(text="Open", clickable=True, bounds="[0,300][400,400]")]
+        device = FakeDevice([first, second, first, second, first])
+        install_script(monkeypatch, [("CLICK", "1")] * 4 + [("DONE", None)])
+        agent = Agent("finish the flow", device=device)
+        list(agent.run())
+        assert agent.state["status"] == "done"
+        assert not any(e["type"] == "cycle" for e in agent.state["events"])
+
+
 class TestTyping:
     def test_type_text_calls_helper_and_executes_fill(self, monkeypatch):
         tree = [node(cls="android.widget.EditText", rid="com.example:id/query", text="", clickable=False)]

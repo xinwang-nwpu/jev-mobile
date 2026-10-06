@@ -1,10 +1,10 @@
 # jev-mobile ⚡
 
-**Android 手机自动化 agent：一次 Jev 模型请求同时决策"做什么操作"和"操作哪个元素"，无截图、纯 A11Y 无障碍树结构化状态，ADB 直接执行。**
+**Android 手机自动化 agent：Jev 基于 A11Y 树快速决策，遇到问题后由视觉 agent 接管，ADB 直接执行。**
 
 [English](README.en.md)
 
-给它一句自然语言目标，例如"打开设置，把飞行模式开关打开"。[TypeSafe Jev](https://docs.typesafe.ai/) 从 A11Y 元素表里选出操作和目标元素；只有当操作是 `TYPE_TEXT` 时，才由一个小 LLM 生成要输入的文本。整个过程不依赖截图识别，决策快、执行快。
+给它一句自然语言目标，例如"打开设置，把飞行模式开关打开"。[TypeSafe Jev](https://docs.typesafe.ai/) 从 A11Y 元素表里选出操作和目标元素；快路径的 `TYPE_TEXT` 由一个小 LLM 生成文本。配置视觉模型后，卡住时改用截图决策，保留原任务和执行历史。
 
 ## 演示
 针对任务"在哔哩哔哩，播放龙卷风视频"，总共用时18秒每次动作决策只需要2-3s!，完全不需要多模态大模型参与token消耗量极小。
@@ -40,18 +40,48 @@ A11Y树 → 元素表 ────→ │ operation（选哪个操作）      �
                    小 LLM → 文本 → adb 键盘
 ```
 
-目标问题都是投机的：若操作是 `CLICK`，只有 `click_target` 会被执行。两个决策、**一次网络往返**；每个目标头只包含与该操作兼容的元素。元素索引由代码分配（快照内的位置），模型输出永远只是"已观察到的索引"——不会变成选择器、坐标或 shell 命令，也就不存在被 UI 文本注入操纵的执行路径。
+目标问题都是投机的：若操作是 `CLICK`，只有 `click_target` 会被执行。两个决策、**一次网络往返**；每个目标头只包含与该操作兼容的元素。快路径的元素索引由代码分配；视觉路径的坐标先做范围与类型校验。两条路径都只执行预定义动作，不允许模型生成 shell 命令。
 
-**完成判定独立成题。** 同一次请求里还并行求值一道 noul 题「当前目标是否已达成」：判定为真（≥ 0.5）即可结束任务，即使操作头还想继续行动——这正是"视频明明在播、模型却反复点击无标签元素死活不肯结束"的解药；判定否决时，操作头的 DONE 会被打回、执行一次 WAIT 后带新证据重判，连续两票否决后第三次 DONE 放行，不会反向死循环。任务终止不再依赖 DONE 在十来个操作里竞争。
+**完成判定独立成题。** 快路径同一次请求里求值 noul 题「当前目标是否已达成」：判定为真（≥ 0.5）即可结束任务。否决 DONE 时先 WAIT 重判；连续两次否决后，第三次 DONE 交给视觉链路。未启用视觉时保留原来的第三次 DONE 放行规则。视觉完成由 Planner 或 Executor 提议，再重新截图交给独立 Verifier 逐项检查原始任务清单；证据不足则重新规划修复。
+
+## 快慢两级执行
+
+视觉模块研究本地 Mobilerun 的任务状态、Manager/Executor、工具执行、截图和推理纠错机制后独立重写，形成「规划 → 单步执行 → 结果反馈 → 重规划 / 完成复核」循环。源码、协议和提示词均独立编写；不需要安装 Mobilerun 或 LlamaIndex，图像处理新增 Pillow。[实现对照与完整说明](docs/visual-agent.md)。
+
+在 `.env` 中设置以下变量；模型必须支持图片输入和 OpenAI 兼容的 Chat Completions JSON 输出：
+
+```dotenv
+VISION_MODEL_API_KEY=你的密钥
+VISION_MODEL_BASE_URL=https://openrouter.ai/api/v1
+VISION_MODEL=你的视觉模型名
+```
+
+同时配置密钥和模型名后默认启用；未配置时继续使用原来的快路径。切换条件是 A11Y 读取失败、没有点击/输入目标、决策模型失败、执行异常、连续三步无变化、同一按钮四次点击使页面往返切换、或完成判定持续冲突。
+
+视觉模型每步看到原始任务、交接原因、全程动作摘要、最近 6 次详细执行结果、前后截图、任务清单、累计进度、剩余计划、子目标、证据记忆和预算。支持点/区域点击、长按、替换/追加/已聚焦输入、任意方向滑动、启动已安装 App、返回、主页、回车和可调等待。坐标为 0–1000 整数，按原生 PNG 尺寸映射，图片等比例缩放且不裁剪。
+
+Planner 首次规划后，Executor 根据每轮新观察持续执行，凭证据推进计划阶段；出现偏差、失败、卡住、过期动作或完成复核否决时再重规划。正常步骤不重复调用 Planner，Executor 的完成提议也必须经过独立复核。
+
+交接后视觉接管剩余任务，共享 60 次动作尝试和 240 次决策模型调用尝试，含规划、执行、复核、失败和格式纠正。无效输出每阶段最多 3 次尝试；执行失败、卡住或完成被否决会反馈重规划，连续 3 次恢复后阻塞。`--no-screenshots` 仅跳过快路径截图；关闭恢复用 `--no-vision-fallback`。轨迹保存模式、子目标、前后页面、失败、各角色响应和用量。
+
+可从第一步直接使用视觉链路，无需 Jev 或文本助手密钥：
+
+```powershell
+python -m jev_mobile --vision-only --task "你的任务"
+```
+
+也可配置 `vision_only: true`。提示词位于 `jev_mobile/visual_prompts.py`；默认三种角色共用 `VISION_MODEL`，可通过 `VISION_PLANNER_MODEL` / `VISION_EXECUTOR_MODEL` / `VISION_VERIFIER_MODEL` 分别指定。
+
+视觉路径也提供当前 A11Y 编号表，支持 `{"action":"CLICK","index":1}` 这种目标参数，以及按编号长按/输入；模型实际返回还须包含 status、summary、completed_steps、reason 和 expected_effect。编号复用 Jev 元素表，执行前复读核对，避免旧编号点错新控件。A11Y 不可用时保留坐标操作；一次探测失败后在本次设备连接内停用后续探测，重跑会重新尝试。详见 [编号与坐标执行](docs/visual-agent.md#a11y-编号与坐标共同执行)。
 
 ## 为什么快
 
 - **每步只发一次模型请求。** 操作头、所有目标头和「目标是否已达成」的独立判定（noul）共享同一份观察状态，在同一次请求里并行求值。
 - **默认循环不截图。** Jev 消费结构化状态：className、text、contentDescription、resourceId、bounds、checked/selected 等语义属性。
 - **一次 A11Y 读取覆盖全部状态，且三路并行。** 优先读 Portal（`com.mobilerun.portal` / `com.droidrun.portal` 的 ContentProvider，一条 `content query` 拿到整棵树和手机状态），未安装时回退 `uiautomator dump /dev/tty`（单次往返直接取回 XML）。树、焦点窗口、截图并发执行，一次观察只花最慢一路的时间。
-- **廉价的新鲜度守卫。** 预测前比较 `dumpsys window` 焦点窗口是否变化（设备端 grep，只传回一行）；接受 DONE/BLOCKED 前做一次完整的语义指纹比对，防止在过期画面上宣布完成。
+- **廉价的新鲜度守卫。** 预测前比较焦点窗口；快路径接受 DONE/BLOCKED 前比对语义指纹。视觉路径检查焦点窗口，避免用像素完全相等拒绝动画画面；同一窗口里的画面变化仍可能让决策过期。
 - **文本按需生成、按路径优化。** 输入框清空在设备端一条 shell 完成（`MOVE_END` + 循环 `DEL`）；中文等非 ASCII 文本走 ADB Keyboard 广播；IME 只在首次输入时切换、结束时恢复。
-- **语义指纹而非截图 diff。** 对"活动 + 可见文本 + 动作签名"做哈希；连续 3 步语义无变化且非 WAIT 即判定卡住并停止，不烧预算。
+- **快路径用语义指纹。** 连续 3 步无变化且非 WAIT，或同一控件在两个状态间反复切换时转入视觉；未启用恢复时停止。视觉用未叠加网格的灰度摘要过滤微小变化，卡住后重规划；动画仍可能被当成变化，全程预算限制持续循环。
 
 ## 快速开始（复现步骤）
 
@@ -159,7 +189,9 @@ python -m jev_mobile --task "打开设置，把飞行模式开关打开" --recor
 | `--adb-path` / `--device` | 覆盖 `ADB_PATH` / `ANDROID_DEVICE` |
 | `--record-dir` | 保存逐步截图与 `trace.json`；缺省自动按任务名存到 `runs/<任务名>/` |
 | `--screenshots` | 观察时附带截图（`--record-dir` 隐含开启） |
-| `--no-screenshots` | 录制时也跳过截图、只留 `trace.json`（每步截图约 1s，追求速度时开启） |
+| `--no-screenshots` | 跳过快路径截图，视觉接管后仍截图 |
+| `--no-vision-fallback` | 关闭视觉接管；`--no-screenshots` 本身不关闭视觉截图 |
+| `--vision-only` | 从第一步使用视觉规划/执行/复核，不需要 Jev 密钥 |
 | `--action-interval` | 每个动作执行后额外等待的秒数，默认 0（环境变量 `ACTION_INTERVAL`） |
 
 ### 库
@@ -184,6 +216,12 @@ with Agent("打开设置，把飞行模式开关打开", start_package="com.andr
 | `TEXT_MODEL_API_KEY` | 文本生成模型密钥（需要打字时必填） | — |
 | `TEXT_MODEL_BASE_URL` | 任意 OpenAI 兼容接口 | `https://api.deepseek.com/v1` |
 | `TEXT_MODEL` / `TEXT_MODEL_REASONING` | 文本模型名 / 是否关思考 | `deepseek-chat` / — |
+| `VISION_MODEL_API_KEY` / `VISION_MODEL` | 视觉模型密钥 / 支持图片输入的模型名，同时设置才启用恢复 | — |
+| `VISION_MODEL_BASE_URL` | 视觉模型 OpenAI 兼容接口 | `https://openrouter.ai/api/v1` |
+| `VISION_PLANNER_MODEL` / `VISION_EXECUTOR_MODEL` / `VISION_VERIFIER_MODEL` | 各角色模型，端点与密钥共用 | 复用 `VISION_MODEL` |
+| `VISION_MODEL_TIMEOUT` | 视觉超时秒数，允许 1–300 | `90` |
+| `VISION_IMAGE_MAX_SIDE` | 完整截图最长边，允许 320–4096 | `1600` |
+| `VISION_CHANGE_THRESHOLD` | 灰度平均差异阈值，允许 0–255；仅用于卡住检测 | `3` |
 | `ADB_PATH` / `ANDROID_DEVICE` | adb 路径 / 设备序列号 | `adb` / 空 |
 | `ACTION_INTERVAL` | 每个动作执行后额外等待的秒数 | `0` |
 
@@ -195,6 +233,9 @@ with Agent("打开设置，把飞行模式开关打开", start_package="com.andr
 | `jev_mobile/a11y.py` | 一次快照 → 索引化动作空间（click/fill + 固定控件）、可见文本、语义指纹 |
 | `jev_mobile/device.py` | ADB 连接、Portal/uiautomator 树读取、tap/swipe/键盘输入、IME 管理 |
 | `jev_mobile/model.py` | TypeSafe 动态操作/目标头 + 小模型文本生成，选择结果校验 |
+| `jev_mobile/vision.py` | 视觉规划、执行请求、完成复核、共享上下文、校验与恢复 |
+| `jev_mobile/visual_prompts.py` | 独立编写的 Planner / Executor / Verifier 提示词 |
+| `jev_mobile/visual_images.py` | 完整图缩放、网格、原生尺寸契约、变化检测 |
 | `jev_mobile/config.py` | 加载 config.yaml（未知键报错，防拼写错误） |
 | `jev_mobile/questions.py` | 决策与文本指令 |
 | `scripts/jev_probe.py` | Jev 模型探测脚本：单独测试 Choice / Score / Noul 三种原语 |
@@ -211,11 +252,11 @@ python scripts/jev_probe.py --demo                                       # 一�
 
 ## 设计边界
 
-- **点击前不做逐元素重校验。** ADB 重读整棵 A11Y 树代价不可忽略，因此执行使用观察到的坐标，事后用语义指纹检测分歧；决策期间的窗口切换由焦点守卫捕获。
+- **编号与坐标的守卫不同。** 视觉编号操作执行前复读 A11Y，编号表、窗口或尺寸改变就重新决策；快路径及视觉坐标操作保留焦点守卫和事后变化检测，同窗口布局变化仍可能让坐标过期。复读 A11Y 有额外开销。
 - **没有下拉选择（SELECT）操作。** Android 的下拉控件统一走点击流程。
-- **上限：** 动作 60 步、决策 120 次、元素 250 个。
+- **上限：** 动作尝试 60 次、决策模型调用尝试 240 次、快路径元素 250 个；文本助手另外统计，次数受动作预算约束。
 - **uiautomator 回退路径慢**（单次 dump 约 1s，部分设备可达数秒）；装 Portal 是主要加速手段，但 Portal 查询自身的耗时（约 100ms~1s，因设备而异）构成每步观察耗时的下限。
-- **DONE 由独立目标判定把关。** 同请求中的 noul 题「目标是否已达成」决定终止：判定为真即可结束（即便操作头仍想行动），判定否决会把 DONE 打回等待重判（连续两票后放行）。**DONE 依然不是证明**：模型宣布完成只代表它看到了可见证据，任务是否真正成功仍需独立验证（如检查任务要求的最终状态）。
+- **完成仍是模型判断。** 视觉增加了新截图上的独立复核，同一模型的两次判断仍可能同时出错。正常 Jev 完成不强制调用视觉；纯视觉每次完成都复核。没有自动切回快路径，也未移植云设备、iOS、MCP 或技能系统。尚未验证实机成功率与参考工程相同。
 
 ## 开发
 

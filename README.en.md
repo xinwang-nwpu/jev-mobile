@@ -1,10 +1,10 @@
 # jev-mobile ⚡
 
-**An Android phone agent: one TypeSafe Jev request decides both the operation and its target element — no screenshots, pure structured A11Y-tree state, executed directly over ADB.**
+**An Android phone agent: TypeSafe Jev makes fast A11Y decisions; a visual agent takes over after problems. Both execute over ADB.**
 
 [中文文档](README.md)
 
-Give it a natural-language goal such as "Open Settings and turn on Airplane Mode." [TypeSafe Jev](https://docs.typesafe.ai/) picks an operation and a target from the indexed element table; only when the operation is `TYPE_TEXT` does a small LLM generate the text to enter. The loop never depends on screenshot recognition, so decisions and execution stay fast.
+Give it a natural-language goal such as "Open Settings and turn on Airplane Mode." [TypeSafe Jev](https://docs.typesafe.ai/) picks an operation and a target from the indexed element table. A small LLM supplies fast-path text. Configuring a visual model enables screenshot-based recovery with the original goal and executed history.
 
 ## Demo
 
@@ -42,18 +42,42 @@ A11Y tree → table ──→│ operation (what to do)     │
                  small LLM → text → adb keyboard
 ```
 
-Target questions are speculative: if the operation is `CLICK`, only `click_target` can execute. Two decisions, **one network round trip**; each target head contains only elements compatible with that operation. Element indices are assigned by code (positions within the snapshot), and model output is always an already-observed index — never a selector, coordinate, or shell command, so there is no execution path for UI-text injection.
+Target questions are speculative: if the operation is `CLICK`, only `click_target` can execute. Two decisions, **one network round trip**; each target head contains only compatible elements. The fast path uses observed indexes; the visual path validates coordinate types and ranges. Both execute predefined actions rather than model-generated shell commands.
 
-**Termination is a separate question.** The same request also evaluates a noul question "is the goal already achieved?" in parallel: a true verdict (≥ 0.5) ends the task even while the operation head still wants to act — the antidote to "the video is clearly playing, yet the model keeps tapping unlabeled elements and refuses to stop." A false verdict sends the operation head's DONE back: one WAIT runs, then the goal is re-judged with fresh evidence; after two consecutive vetoes the third DONE is accepted, so the gate cannot loop forever. Termination no longer depends on DONE winning a softmax over a dozen operations.
+**Termination is a separate question.** A fast-path noul verdict ≥ 0.5 ends the task. A false verdict vetoes DONE and runs WAIT; after two vetoes, a third DONE goes to visual recovery. Without recovery, legacy third-DONE acceptance remains. Visual completion requires a planner or executor proposal followed by a separate verifier request on a freshly captured image, covering every original checklist item; rejection returns to planning.
+
+## Fast decisions and visual recovery
+
+The visual module independently implements the planning, execution, feedback, memory, image and inference mechanisms studied in local Mobilerun. Source, prompts and protocols were authored independently. It needs neither Mobilerun nor LlamaIndex; Pillow handles images. See the [implementation comparison](docs/visual-agent.md) (Chinese).
+
+Set an image-capable model supporting OpenAI-compatible Chat Completions and JSON output in `.env`:
+
+```dotenv
+VISION_MODEL_API_KEY=your-key
+VISION_MODEL_BASE_URL=https://openrouter.ai/api/v1
+VISION_MODEL=your-vision-model
+```
+
+Recovery is enabled when both key and model are configured. It triggers on failed A11Y observation, missing click/input targets, model or execution errors, three unchanged actions, four clicks toggling the same control between two states, or persistent completion disagreement.
+
+Every request receives the original goal, handoff reason, all attempted-action summaries, six detailed recent outcomes, labelled before/current images, the checklist, cumulative progress, remaining plan, subgoal, evidence memory and remaining budget. Supported device actions include point/area click, adjustable long press/swipe/wait, focused/replacement/append input, installed-app launch, back, home and enter. The executor cannot finish a task. Integer coordinates use 0–1000 and map to native PNG dimensions; resizing preserves the full image.
+
+The planner creates a stage plan once; the executor continues from fresh observations, advancing stages only with observed evidence. Deviations, execution failures, stalls, stale actions or rejected completion trigger replanning. Executor replies use `status: act|replan|complete`, a cumulative summary and consecutive `completed_steps`; only act includes a device action. Completion proposals always require independent review.
+
+Visual mode takes over for the remaining task. Both modes share 60 device-action attempts and 240 logical decision-model attempts, including all roles, failed responses and schema corrections. Each role gets at most three response attempts; execution errors, stalls and rejected completion feed back into planning, stopping after three recovery feedbacks without detected change. `--no-screenshots` affects fast-path images only. Disable recovery with `--no-vision-fallback`. Traces preserve role responses, usage, subgoals, before/after pages and errors.
+
+Run the visual workflow from the first observation with `python -m jev_mobile --vision-only --task "Your task"`, or set `vision_only: true`. This needs only the visual key/model. Prompts live in `jev_mobile/visual_prompts.py`; optional `VISION_PLANNER_MODEL`, `VISION_EXECUTOR_MODEL` and `VISION_VERIFIER_MODEL` override the shared model using the same endpoint/key.
+
+Visual requests also carry current indexed A11Y elements, using the same numbering as Jev. CLICK, LONG_PRESS and TYPE_TEXT support integer index targets; CLICK/LONG_PRESS also accept coordinates, and indexed input reads the field's current value from the snapshot. Indexed actions refresh the tree before dispatch and replan when the table, focus or dimensions changed. A11Y is optional: a failed probe disables further probes on this Device instance while screenshot/coordinate actions continue; a new Device retries. See the [index/coordinate contract](docs/visual-agent.md#a11y-编号与坐标共同执行).
 
 ## Why it moves
 
 - **One model request per step.** The operation head, every target head, and the independent goal-achieved judgment (noul) share the same observed state and are evaluated in parallel within a single request.
 - **No screenshots in the default loop.** Jev consumes structured state: className, text, contentDescription, resourceId, bounds, checked/selected, and related semantic properties.
 - **One A11Y read covers the whole state, and three reads run in parallel.** Prefer the Portal content provider (`com.mobilerun.portal` / `com.droidrun.portal`): a single `content query` returns the full tree plus phone state; fall back to `uiautomator dump /dev/tty` (one round trip streams the XML back) when absent. Tree, focused window, and screenshot are fetched concurrently, so one observation costs the slowest read, not the sum.
-- **Cheap freshness guards.** Before predicting, compare the `dumpsys window` focus (grepped on the device; one line comes back); before accepting DONE/BLOCKED, run one full semantic-fingerprint comparison so the agent never declares success on a stale screen.
+- **Cheap freshness guards.** Compare window focus before predicting and semantic fingerprints before fast-path stops. Visual stops check window focus, since pixel equality rejects animated screens; changes within the same window can still make a decision stale.
 - **Text is generated only when needed and optimized on the path.** Clearing a field happens in one device-side shell (`MOVE_END` + repeated `DEL`); non-ASCII text goes through an ADB Keyboard broadcast; the IME is switched once on first input and restored on close.
-- **Semantic fingerprints, not screenshot diffs.** A hash over "activity + visible text + action signatures"; three consecutive steps with no semantic change and no WAIT means stuck — the run stops instead of burning budget.
+- **Fast-path semantic fingerprints.** Three unchanged non-WAIT steps or a two-state click cycle trigger recovery, or stop when disabled. Visual stalls use grayscale summaries before adding the grid, followed by replanning. Animations can still look like progress; shared budgets bound repeated actions.
 
 ## Quickstart (reproducing this project)
 
@@ -161,7 +185,9 @@ python -m jev_mobile --task "Open Settings and turn on Airplane Mode" --record-d
 | `--adb-path` / `--device` | Override `ADB_PATH` / `ANDROID_DEVICE` |
 | `--record-dir` | Save per-step screenshots and `trace.json`; defaults to `runs/<task-name>/` |
 | `--screenshots` | Observe with screenshots (implied by `--record-dir`) |
-| `--no-screenshots` | Skip screenshots even when recording, keep only `trace.json` (~1s per step saved) |
+| `--no-screenshots` | Skip fast-path screenshots; visual recovery still captures images |
+| `--no-vision-fallback` | Disable visual recovery; `--no-screenshots` alone still allows visual screenshots |
+| `--vision-only` | Start with visual planning/execution/review; no Jev key required |
 | `--action-interval` | Extra seconds to wait after each executed action, default 0 (env: `ACTION_INTERVAL`) |
 
 ### Library
@@ -186,6 +212,12 @@ Loaded automatically from `.env`; CLI flags win:
 | `TEXT_MODEL_API_KEY` | Text-model key (required when typing) | — |
 | `TEXT_MODEL_BASE_URL` | Any OpenAI-compatible endpoint | `https://api.deepseek.com/v1` |
 | `TEXT_MODEL` / `TEXT_MODEL_REASONING` | Text model / disable thinking | `deepseek-chat` / — |
+| `VISION_MODEL_API_KEY` / `VISION_MODEL` | Visual key / image-capable model; both enable recovery | — |
+| `VISION_MODEL_BASE_URL` | OpenAI-compatible visual endpoint | `https://openrouter.ai/api/v1` |
+| `VISION_PLANNER_MODEL` / `VISION_EXECUTOR_MODEL` / `VISION_VERIFIER_MODEL` | Optional role models sharing endpoint/key | `VISION_MODEL` |
+| `VISION_MODEL_TIMEOUT` | Visual timeout, 1–300 seconds | `90` |
+| `VISION_IMAGE_MAX_SIDE` | Longest image edge, 320–4096; no cropping | `1600` |
+| `VISION_CHANGE_THRESHOLD` | Mean grayscale difference, 0–255; stall detection only | `3` |
 | `ADB_PATH` / `ANDROID_DEVICE` | adb path / device serial | `adb` / empty |
 | `ACTION_INTERVAL` | Extra seconds to wait after each executed action | `0` |
 
@@ -197,6 +229,9 @@ Loaded automatically from `.env`; CLI flags win:
 | `jev_mobile/a11y.py` | One snapshot → indexed action space (click/fill + fixed controls), visible text, semantic fingerprint |
 | `jev_mobile/device.py` | ADB connection, Portal/uiautomator tree reads, tap/swipe/keyboard input, IME management |
 | `jev_mobile/model.py` | TypeSafe dynamic operation/target heads + small-model text generation, answer validation |
+| `jev_mobile/vision.py` | Planning/execution/review, shared context, protocol validation and recovery |
+| `jev_mobile/visual_prompts.py` | Original planner/executor/verifier prompts |
+| `jev_mobile/visual_images.py` | Resizing, grid, native dimensions and change detection |
 | `jev_mobile/config.py` | Loads config.yaml (unknown keys are rejected to catch typos) |
 | `jev_mobile/questions.py` | Decision and text instructions |
 | `scripts/jev_probe.py` | Jev probe: test the Choice / Score / Noul primitives standalone |
@@ -213,11 +248,11 @@ python scripts/jev_probe.py --demo                                          # al
 
 ## Design boundaries
 
-- **No per-element freshness check before a tap.** Re-reading the whole A11Y tree over ADB is not cheap, so execution uses the observed coordinates and divergence is detected afterwards via the semantic fingerprint; window switches during a decision are caught by the focus guard.
+- **Freshness depends on target type.** Visual indexed actions refresh A11Y before dispatch, rejecting changed tables, windows or dimensions. Fast-path and visual coordinate actions retain focus guards and post-action change detection; layout changes within a window can still stale their coordinates. Tree refresh adds overhead.
 - **No SELECT operation.** Android dropdowns go through the click flow.
-- **Limits:** 60 actions, 120 decisions, 250 elements per run.
+- **Limits:** 60 device-action attempts, 240 logical decision-model attempts, 250 fast-path elements. Fast-path text helpers are counted separately and bounded by the action limit.
 - **The uiautomator fallback is slow** (~1s per dump, several seconds on some devices); Portal is the main accelerator, but the Portal query's own latency (~100ms–1s depending on the device) sets the floor for each observation.
-- **DONE is gated by the independent goal judgment.** The noul question "is the goal achieved?" decides termination: a true verdict ends the run (even if the operation head wanted to act); a false verdict sends DONE back to wait and re-judge (accepted after two consecutive vetoes). **DONE is still not proof**: the model declaring DONE only means it saw visible evidence; whether the task truly succeeded still needs independent verification (e.g. checking the required final state).
+- **Completion is still a model judgment.** Visual mode now has separate review on fresh images; two judgments by the same model can share errors. Normal fast-path completion does not invoke visual review; use vision-only mode to review every finish. No automatic return to Jev, cloud/iOS/MCP/skill-service port or measured real-device success-rate parity is claimed.
 
 ## Development
 

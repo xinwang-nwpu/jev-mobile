@@ -147,3 +147,42 @@ def test_checked_state_is_kept_on_actions():
     state = make_page([node(cls="android.widget.CheckBox", text="Dark mode", clickable=True, checked=True)])
     toggle = next(a for a in state["actions"] if a["kind"] == "click")
     assert toggle["checked"] is True
+
+
+def test_clickable_containers_keep_their_child_labels_in_model_elements():
+    from jev_mobile.model import action_space
+
+    tree = [
+        node(cls="android.widget.RelativeLayout", clickable=True, children=[node(text="默认排序")]),
+        node(cls="android.view.ViewGroup", clickable=True, bounds="[0,300][1000,800]", children=[
+            node(text="周杰伦《龙卷风》现场", bounds="[10,350][900,450]"),
+            node(text="04:10", bounds="[10,450][200,500]"),
+        ]),
+    ]
+    page = make_page(tree)
+    elements, _, _ = action_space(page["actions"])
+    assert elements[0]["label"] == "默认排序"
+    assert elements[1]["label"] == "周杰伦《龙卷风》现场 · 04:10"
+    assert page["actions"][0]["id"] == "tap-0"
+    assert page["actions"][0]["center"] == [200, 150]
+
+
+def test_container_label_ignores_children_outside_its_bounds_and_deduplicates():
+    tree = [node(cls="android.view.ViewGroup", clickable=True, children=[
+        node(text="wrong video", bounds="[1000,1000][1200,1200]"),
+        node(text="title"),
+        node(desc="title"),
+        node(text="uploader"),
+    ])]
+    assert make_page(tree)["actions"][0]["label"] == "title · uploader"
+
+
+def test_container_own_label_and_editable_field_name_take_priority():
+    tree = [
+        node(text="Search", clickable=True, children=[node(text="child")]),
+        node(cls="android.widget.EditText", rid="com.example:id/query", clickable=True,
+             children=[node(text="suggestion")]),
+    ]
+    actions = make_page(tree)["actions"]
+    assert actions[0]["label"] == "Search"
+    assert next(a for a in actions if a["kind"] == "fill")["label"] == "query"

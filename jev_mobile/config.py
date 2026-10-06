@@ -24,6 +24,8 @@ DEFAULTS: Dict[str, Any] = {
     "screenshots": False,
     "action_interval": 0.0,
     "quiet": False,
+    "vision_fallback": True,
+    "vision_only": False,
 }
 
 
@@ -51,6 +53,9 @@ def load_config(path: Optional[str] = None) -> Dict[str, Any]:
     config["action_interval"] = float(config.get("action_interval") or 0)
     config["screenshots"] = bool(config.get("screenshots"))
     config["quiet"] = bool(config.get("quiet"))
+    for key in ("vision_fallback", "vision_only"):
+        if type(config[key]) is not bool:
+            raise ValueError("%s must be true or false" % key)
     if "action_interval" not in explicit:
         # The environment is the fallback only when the file does not set the value.
         try:
