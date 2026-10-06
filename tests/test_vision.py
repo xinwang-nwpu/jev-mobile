@@ -513,10 +513,65 @@ def test_incomplete_or_mixed_completion_cannot_act_or_skip_review(monkeypatch, i
     requests = enable(monkeypatch, [plan()] + [invalid] * 3)
     device = VisualDevice([[node(text="Canvas")]])
     agent = loop.Agent("goal", device=device, vision_only=True)
-    with pytest.raises(RuntimeError, match="after 3 attempts"):
-        agent.tick()
+    agent.tick()
     assert not device.acts and agent.state["progress"]["plan_cursor"] == 0
     assert len(requests) == 4 and not any(c["role"] == "verifier" for c in agent.state["model_calls"])
+    assert agent.state["status"] == "ready" and agent.state["progress"]["needs_plan"]
+    assert agent.state["progress"]["feedback"]["kind"] == "invalid_executor_output"
+    assert agent.trace()["model_calls"][-1]["output"] == invalid
+
+
+def test_cumulative_stage_report_is_idempotent_and_cannot_skip_or_rewrite_evidence():
+    saved = {"index": 1, "evidence": "Saved result", "steps": [1]}
+    progress = {**vision.initial_progress(), "plan": ["First", "Second", "Third"],
+                "plan_cursor": 1, "completed_steps": [saved]}
+    repeated = {"index": 1, "evidence": "Rephrased result", "steps": [1]}
+    next_stage = {"index": 2, "evidence": "New observed result", "steps": [2]}
+    result = vision.parse_execution(action("BACK", completed_steps=[repeated, next_stage]), progress, 2, (1080, 2340))
+    assert result["plan_cursor"] == 2 and result["completed_steps"] == [next_stage]
+    assert progress["plan_cursor"] == 1 and progress["completed_steps"] == [saved]
+    for invalid in ([repeated, repeated], [{**next_stage, "index": 3}], [{**repeated, "steps": [99]}]):
+        with pytest.raises(ValueError):
+            vision.parse_execution(action("BACK", completed_steps=invalid), progress, 2, (1080, 2340))
+
+
+def test_input_then_submit_stays_in_same_stage_and_recovers_invalid_progress(monkeypatch):
+    done = {"index": 1, "evidence": "Earlier stage observed", "steps": [1]}
+    invalid = action(point=[700, 500], completed_steps=[{**done, "index": 9}])
+    requests = enable(monkeypatch, [
+        plan(plan=["Open target", "Enter supplied text, submit, and observe the new item"]),
+        action(point=[200, 500]),
+        action("TYPE_TEXT", point=[500, 500], text="new value", clear=True, current_text="", completed_steps=[done]),
+        invalid, invalid, invalid,
+        plan(plan=["Submit the already entered value and observe the new item"]),
+        action(point=[700, 500]), execution(), review(),
+    ])
+    device = VisualDevice([[node(text="Canvas")]])
+    agent = loop.Agent("Submit the supplied new value", device=device, vision_only=True)
+    agent.tick()
+    agent.tick()
+    agent.tick()
+    assert len(device.acts) == 2 and agent.state["status"] == "ready"
+    assert agent.state["progress"]["plan_cursor"] == 1 and agent.state["progress"]["needs_plan"]
+    assert agent.trace()["model_calls"][-1]["output"] == invalid
+    assert "next=2" in agent.state["progress"]["feedback"]["message"]
+    list(agent.run())
+    assert agent.state["status"] == "done" and len(device.acts) == 3
+    assert sum(a[0]["kind"] == "fill" for a in device.acts) == 1
+    context = json.loads(requests[3]["messages"][1]["content"][0]["text"])
+    assert context["completed_plan_indexes"] == [1] and context["next_plan_index"] == 2
+    planner_context = json.loads(requests[6]["messages"][1]["content"][0]["text"])
+    assert planner_context["recent_outcomes"][-1]["text"] == "new value"
+
+
+def test_executor_schema_replanning_has_a_shared_recovery_limit(monkeypatch):
+    requests = enable(monkeypatch, [part for _ in range(vision.MAX_RECOVERIES) for part in (plan(), {}, {}, {})])
+    device = VisualDevice([[node(text="Canvas")]])
+    agent = loop.Agent("goal", device=device, vision_only=True)
+    list(agent.run())
+    assert agent.state["status"] == "blocked" and not device.acts
+    assert agent.state["progress"]["recoveries"] == vision.MAX_RECOVERIES
+    assert len(requests) == vision.MAX_RECOVERIES * 4
 
 
 def test_executor_deviation_replans_remaining_work_with_original_checklist(monkeypatch):

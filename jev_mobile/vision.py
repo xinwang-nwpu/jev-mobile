@@ -186,6 +186,10 @@ def parse_review(output, history_size, requirements, proposed_answer=""):
     return {**output, "requirements": rows}
 
 
+class VisualOutputError(RuntimeError):
+    """Executor output was repaired unsuccessfully; no device action was issued."""
+
+
 def parse_execution(output, progress, history_size, screen, installed_apps=(), *, page=None):
     """Advance only an evidenced prefix of this plan; control replies never act."""
     if not isinstance(output, dict) or output.get("status") not in {"act", "replan", "complete"}:
@@ -194,24 +198,39 @@ def parse_execution(output, progress, history_size, screen, installed_apps=(), *
     _string(output.get("reason"), "executor reason", required=True)
     _string(output.get("answer", ""), "answer", limit=12000)
     cursor = progress["plan_cursor"]
+    saved_cursor, last_index, newly_completed = cursor, 0, []
     completed = _items(output.get("completed_steps"), "completed plan steps")
     for item in completed:
         if (not isinstance(item, dict) or type(item.get("index")) is not int
-                or item["index"] != cursor + 1 or cursor >= len(progress["plan"])):
-            raise ValueError("Completed plan steps must be the next consecutive indexes of the current plan")
+                or not last_index < item["index"] <= len(progress["plan"])):
+            raise ValueError("completed_steps indexes must be unique increasing ONE-based plan positions; "
+                             "already completed=%s, next=%d, received=%r (not A11Y indexes or action numbers)" % (
+                                 list(range(1, saved_cursor + 1)), cursor + 1, item))
         _evidence(item, history_size)
+        last_index = item["index"]
+        # A cumulative report may acknowledge stages the program already saved.
+        # It cannot replace their evidence or advance the cursor again.
+        if item["index"] <= saved_cursor:
+            continue
+        if item["index"] != cursor + 1:
+            raise ValueError("Cannot skip unfinished plan step %d (%s); received completion index %d. "
+                             "If this stage still needs actions, return completed_steps: []." % (
+                                 cursor + 1, progress["plan"][cursor], item["index"]))
+        newly_completed.append(item)
         cursor += 1
     parsed = None
     if output["status"] == "act":
         if cursor == len(progress["plan"]):
-            raise ValueError("Plan is exhausted; propose completion review or request replanning")
+            raise ValueError("An act reply cannot complete the entire plan before its action runs. "
+                             "Do not mark the last stage complete if it still needs this action; "
+                             "return completed_steps: [] for that unfinished stage. Otherwise use complete or replan.")
         parsed = parse_action(output, screen, installed_apps, page=page)
     else:
         if any(k in output for k in ("action", "index", "point", "box", "start", "end", "text", "package")):
             raise ValueError("Control replies cannot include a device action")
         if output["status"] == "complete" and cursor != len(progress["plan"]):
             raise ValueError("Completion proposal must evidence every remaining plan step")
-    return {**output, "plan_cursor": cursor, "parsed_action": parsed}
+    return {**output, "completed_steps": newly_completed, "plan_cursor": cursor, "parsed_action": parsed}
 
 
 def parse_action(output, screen, installed_apps=(), *, page=None):
@@ -331,6 +350,9 @@ class VisualAgent:
             # Preserve early supplied/read values without resending the whole navigation history.
             context["entered_values"] = [outcome(h) for h in state["history"] if h.get("text")]
             context["elements"] = visual_elements(state["page"])
+            context["completed_plan_indexes"] = list(range(1, progress["plan_cursor"] + 1))
+            context["next_plan_index"] = (progress["plan_cursor"] + 1
+                                          if progress["plan_cursor"] < len(progress["plan"]) else None)
         if role == "planner":
             context["recovery_reason"] = state["recovery_reason"]
             handoff = state["handoff"]
@@ -402,6 +424,7 @@ class VisualAgent:
                     error_kind = "empty_content"
                     raise ValueError("Model returned an empty JSON body; no device action executed")
                 parsed = json.loads(raw)
+                call["output"] = parsed  # Keep rejected JSON too, without recording hidden reasoning.
                 error_kind = "invalid_output"
                 result = validate(parsed)
                 call.update(status="ok", output=parsed)
@@ -431,7 +454,9 @@ class VisualAgent:
                                              "max_tokens": options["max_tokens"],
                                              "elapsed_ms": call["elapsed_ms"] + round((time.perf_counter() - started) * 1000)})
                 if retry_action == "stop":
-                    raise RuntimeError("Visual %s failed after %d attempts (%s; finish_reason=%s; reasoning_tokens=%s; max_tokens=%d): %s" % (
+                    error_type = (VisualOutputError if role == "executor" and error_kind in {"invalid_output", "response_format"}
+                                  else RuntimeError)
+                    raise error_type("Visual %s failed after %d attempts (%s; finish_reason=%s; reasoning_tokens=%s; max_tokens=%d): %s" % (
                         role, attempt + 1, error_kind, call.get("finish_reason"), call.get("reasoning_tokens"),
                         options["max_tokens"], call["error"])) from None
                 if isinstance(raw, str) and raw.strip() and error_kind in {"response_format", "invalid_output"}:
@@ -464,10 +489,14 @@ class VisualAgent:
                 progress["needs_plan"] = True
                 state["events"].append({"type": "reobserve", "reason": "visual_plan_stale", "elapsed_ms": state["elapsed_ms"]})
                 return self.decision("REPLAN", None, None, call, "Window or screen dimensions changed during planning")
-        output, call = self.request("executor", EXECUTOR,
-                                    lambda o: parse_execution(o, progress, len(state["history"]), state["page"]["screen"],
-                                                              self.installed_apps() if isinstance(o, dict) and o.get("action") == "OPEN_APP" else (),
-                                                              page=state["page"]))
+        try:
+            output, call = self.request("executor", EXECUTOR,
+                                        lambda o: parse_execution(o, progress, len(state["history"]), state["page"]["screen"],
+                                                                  self.installed_apps() if isinstance(o, dict) and o.get("action") == "OPEN_APP" else (),
+                                                                  page=state["page"]))
+        except VisualOutputError as error:
+            operation = "REPLAN" if self.feedback("invalid_executor_output", str(error)) else "BLOCKED"
+            return self.decision(operation, None, None, state["model_calls"][-1], str(error))
         progress.update(summary=output["summary"], plan_cursor=output["plan_cursor"])
         progress["completed_steps"].extend(output["completed_steps"])
         progress["subgoal"] = progress["plan"][progress["plan_cursor"]] if progress["plan_cursor"] < len(progress["plan"]) else ""

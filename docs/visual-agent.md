@@ -125,7 +125,9 @@ Planner 从这些证据重建进度，不直接延续快模型最后一次选择
 
 快路径在观察失败、缺乏点击/输入目标、模型/执行错误、连续 3 步无变化、4 次同控件 A/B 切换、BLOCKED 或持续 DONE 分歧时交接。交接后保持视觉模式，没有自动切回 Jev。
 
-视觉每步把实际结果和新截图提供给 Executor。执行失败、连续 3 个非 WAIT 动作无变化、循环、Executor 提出的计划偏差和完成复核否决会反馈 Planner 并重新规划。单步像素变化不足不会强制重规划，Executor 仍可从截图/控件判断真实进展。连续 3 次恢复反馈后阻塞；可检测的页面变化清零恢复计数。窗口或编号过期会丢弃动作并刷新后重新规划，仍受共享请求上限约束。各角色无效输出最多尝试 3 次，持续失败停止任务。
+视觉每步把实际结果和新截图提供给 Executor。执行失败、连续 3 个非 WAIT 动作无变化、循环、Executor 提出的计划偏差和完成复核否决会反馈 Planner 并重新规划。单步像素变化不足不会强制重规划，Executor 仍可从截图/控件判断真实进展。连续 3 次恢复反馈后阻塞；可检测的页面变化清零恢复计数。窗口或编号过期会丢弃动作并刷新后重新规划，仍受共享请求上限约束。各角色无效输出最多尝试 3 次；Executor 的 JSON/结构错误修正耗尽后转入上述有界重规划，拒绝的动作不会执行，Planner/Verifier 的持续错误或网络/服务拒绝等仍会停止任务。
+
+Executor 上下文显式提供 `completed_plan_indexes` 和 `next_plan_index`。已完成阶段允许累计复述，程序只接纳新增的连续阶段，不覆盖已保存证据；重复、乱序、跳过未完成阶段、越界和未来动作证据仍会拒绝。一个阶段若包含输入、提交和观察结果，输入成功时仍必须保持该阶段未完成。修正错误会给出具体阶段编号及收到的值；拒绝的 JSON 保存在请求记录中便于排查。Verifier 提示词还要求区分本轮新结果与执行前已经存在的同值历史项目。
 
 全程共享 60 次设备动作尝试和 240 次决策模型调用尝试。规划、执行、复核、格式修正和失败响应均计入后者；HTTP 客户端内部对 429/503/529 的最多 3 次传输尝试属于一次逻辑调用。快路径文本助手单独统计，次数受动作上限约束。切换模式不重置预算。
 
@@ -179,7 +181,7 @@ OpenRouter 端点使用 `reasoning` 参数；DeepSeek 官方端点或名称为 D
 3. 截断响应没有报告正数思考 token 时，最多把输出预算提高一次到 8192；再次截断就停止。缺少思考用量不能证明没有思考，因此这只是受限的恢复尝试。
 4. 其他空正文、JSON/结构错误保留最多 3 次尝试上限；HTTP/请求错误单独分类。`content_filter` 或非空 `refusal` 立即停止。截断或空正文不会作为 assistant 消息回传，格式错误才回传有限长度的正文用于修正。
 
-所有重试仍计入共享模型调用预算。`trace.json` 的 `model_calls` 保存 `requested_reasoning`、`request_options`、`reasoning_control`、`response_model`、`finish_reason`、`reasoning_tokens`、`content_chars`；失败还包含 `error_kind` 与 `retry_action`。缺少服务元数据时记录 null；不会保存 `reasoning_content` 思考正文。CLI 失败行显示结束原因、思考 token、输出上限和下一步重试策略。
+所有重试仍计入共享模型调用预算。`trace.json` 的 `model_calls` 保存 `requested_reasoning`、`request_options`、`reasoning_control`、`response_model`、`finish_reason`、`reasoning_tokens`、`content_chars`；失败还包含 `error_kind` 与 `retry_action`，能解析的 JSON 即使被结构校验拒绝也保留在 `output`。缺少服务元数据时记录 null；不会保存 `reasoning_content` 思考正文。CLI 失败行显示结束原因、思考 token、输出上限和下一步重试策略。
 
 思考控制处理推理与失败重试开销；按需重规划减少正常路径的模型请求和规划后刷新次数；角色上下文已裁剪，记忆按当前事实替换。实际耗时与总输入 token 仍需用新运行的 trace 对比。
 

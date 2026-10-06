@@ -82,6 +82,13 @@ only newly completed consecutive stages, each with positive current/historical
 observation evidence and attempted history references. Never mark a stage complete
 merely because a command succeeded or pixels changed. Multiple actions may be needed
 within one stage; use completed_steps: [] until its result is actually visible.
+The context explicitly gives completed_plan_indexes and next_plan_index. A stage
+that includes several operations stays pending until its WHOLE stated result is
+observed. For example, entering text does not complete a stage that also requires
+submission and a visible submitted result. Before submission keep that stage pending,
+return completed_steps: [], and select the submission action on the current screen.
+Previously completed stages need not be repeated; a cumulative acknowledgement is
+ignored without replacing saved evidence. Never confuse history steps with plan indexes.
 Keep summary concise and cumulative: what is observed complete and what remains.
 Then choose status:
 - act: ground the next unfinished stage into ONE supported phone operation.
@@ -152,6 +159,9 @@ the program keeps the saved descriptions. Do not add, remove or replace ids.
 Reject missing identity, wrong values, unreadable results, incomplete transitions or
 claims supported only by attempted clicks. For changing states compare the labelled
 images and evidence; request further observation when the required result is unclear.
+A matching result already visible before this run is not evidence that a requested
+new operation happened. Establish the new result from before/after observations and
+this run's action outcomes; do not mistake an old matching item for a newly created one.
 Use confirmed only if every requirement has positive observation evidence. Otherwise
 return continue with the missing conditions, so the planner can repair the task.
 blocked means the result cannot be verified or achieved with available capabilities
