@@ -156,12 +156,20 @@ def parse_plan(output, history_size, previous):
         raise ValueError("Terminal proposal cannot include pending actions")
     if output["status"] == "complete" and any(r["status"] != "satisfied" for r in requirements):
         raise ValueError("Completion proposal has unmet requirements")
-    for fact in _items(output.get("memory"), "memory", 60):
+    memory, keys, facts = [], set(), set()
+    for fact in _items(output.get("memory"), "memory", 20):
         if not isinstance(fact, dict):
             raise ValueError("Invalid memory fact")
-        _string(fact.get("fact"), "memory fact", required=True)
+        key = _string(fact.get("key"), "memory key", required=True, limit=80).strip().casefold()
+        if key in keys:
+            raise ValueError("Memory keys must be unique; consolidate each fact once")
+        keys.add(key)
+        normalized = " ".join(_string(fact.get("fact"), "memory fact", required=True, limit=1000).split()).casefold()
         _evidence(fact, history_size)
-    return {**output, "requirements": requirements}
+        if normalized not in facts:
+            memory.append({"key": key, "fact": fact["fact"], "evidence": fact["evidence"], "steps": fact["steps"]})
+            facts.add(normalized)
+    return {**output, "requirements": requirements, "memory": memory}
 
 
 def parse_review(output, history_size, requirements, proposed_answer=""):
@@ -290,19 +298,51 @@ class VisualAgent:
         self.capture, self.installed_apps = capture, installed_apps
         self.previous_page = None  # Images stay outside persistent JSON state.
 
-    def context(self):
+    def context(self, role):
         state = self.state
-        compact_keys = ("step", "mode", "operation", "action", "text", "success", "error", "page_changed", "activity_before", "activity")
-        detail_keys = compact_keys + ("device_action", "page_before", "page_after", "expected_effect", "subgoal")
-        return {
-            "goal": state["goal"], "recovery_reason": state["recovery_reason"], "handoff": state["handoff"],
-            "current_page": page_summary(state["page"]), "previous_page": page_summary(self.previous_page),
-            "attempted_actions": [{k: h.get(k) for k in compact_keys} for h in state["history"]],
-            "recent_outcomes": [{k: h.get(k) for k in detail_keys} for h in state["history"][-6:]],
-            "progress": state["progress"], "installed_apps": self.installed_apps(),
-            "elements": visual_elements(state["page"]),
+        progress = state["progress"]
+        def page_view(page):
+            if not page:
+                return None
+            return {**{k: page.get(k) for k in ("app", "activity", "screen")}, "text": (page.get("text") or "")[:1500]}
+
+        def outcome(item, detailed=False):
+            result = {k: item.get(k) for k in ("step", "mode", "operation", "text", "success", "error") if item.get(k) is not None}
+            result["target"] = (item.get("action") or "")[:200]
+            if detailed:
+                result.update(expected_effect=item.get("expected_effect"), subgoal=item.get("subgoal"),
+                              page_before=page_view(item.get("page_before")), page_after=page_view(item.get("page_after")))
+            return result
+
+        progress_keys = {
+            "planner": ("summary", "requirements", "plan", "plan_cursor", "completed_steps", "memory", "feedback", "revision"),
+            "executor": ("summary", "requirements", "plan", "plan_cursor", "subgoal", "success_condition", "memory", "feedback"),
+            "verifier": ("summary", "requirements", "completed_steps", "memory", "proposed_answer"),
+        }[role]
+        context = {
+            "goal": state["goal"], "current_page": page_view(state["page"]),
+            "recent_outcomes": [outcome(h, True) for h in state["history"][-(2 if role == "executor" else 3):]],
+            "progress": {k: progress[k] for k in progress_keys},
             "remaining_actions": max(0, state["action_limit"] - len(state["history"])),
         }
+        if role != "executor":
+            context["attempted_actions"] = [outcome(h) for h in state["history"]]
+        else:
+            # Preserve early supplied/read values without resending the whole navigation history.
+            context["entered_values"] = [outcome(h) for h in state["history"] if h.get("text")]
+            context["elements"] = visual_elements(state["page"])
+        if role == "planner":
+            context["recovery_reason"] = state["recovery_reason"]
+            handoff = state["handoff"]
+            context["handoff"] = ({"reason": handoff["reason"], "after_step": handoff["after_step"],
+                                   "last_fast_observation": page_view(handoff.get("last_fast_observation"))} if handoff else None)
+        hint = progress["subgoal"] + " ".join(progress["plan"][progress["plan_cursor"]:progress["plan_cursor"] + 1])
+        if not progress["plan"]:
+            hint = state["goal"]
+        if role != "verifier" and ("launcher" in (state["page"].get("app") or "").lower()
+                                   or any(word in hint.lower() for word in ("open", "launch", "start", "打开", "启动"))):
+            context["installed_apps"] = self.installed_apps()
+        return context
 
     def request(self, role, prompt, validate):
         model = os.environ.get("VISION_%s_MODEL" % role.upper()) or os.environ["VISION_MODEL"]
@@ -310,8 +350,9 @@ class VisualAgent:
         effort = os.environ.get("VISION_%s_REASONING" % role.upper()) or ("none" if role == "executor" else "low")
         reasoning_options(url, model, effort)  # Validate configuration before spending a request.
         output_tokens = OUTPUT_TOKENS
-        context = self.context()
-        content = [{"type": "text", "text": json.dumps(context, ensure_ascii=False)}]
+        context = self.context(role)
+        context_text = json.dumps(context, ensure_ascii=False, separators=(",", ":"))
+        content = [{"type": "text", "text": context_text}]
         for label, page in (("previous", self.previous_page), ("current", self.state["page"])):
             if page and page.get("screenshot"):
                 content += [{"type": "text", "text": "%s image; native screen %s, model image %s; coordinates 0..1000" % (
@@ -326,7 +367,9 @@ class VisualAgent:
             controls = reasoning_options(url, model, effort)
             options = {"max_tokens": output_tokens, **controls}
             call.update(requested_reasoning=effort, request_options=options, reasoning_control=bool(controls))
-            call["observed"] = {**page_summary(self.state["page"]), "elements": context["elements"]}
+            call["observed"] = {**page_summary(self.state["page"]), "elements": visual_elements(self.state["page"])}
+            call["context_chars"] = len(context_text)
+            call["image_count"] = sum(item["type"] == "image_url" for item in content)
             started = time.perf_counter()
             raw = None
             error_kind, fatal = "request_error", False
@@ -400,12 +443,8 @@ class VisualAgent:
         if progress["needs_plan"]:
             proposal, call = self.request("planner", PLANNER,
                                           lambda o: parse_plan(o, len(state["history"]), progress["requirements"]))
-            memory = {m["fact"]: m for m in progress["memory"]}
-            memory.update({m["fact"]: m for m in proposal["memory"]})
-            if len(memory) > 60:
-                raise ValueError("Visual memory exceeded 60 facts; consolidate the task evidence")
             progress.update({k: proposal[k] for k in ("summary", "requirements", "plan", "subgoal", "success_condition")})
-            progress.update(memory=list(memory.values()), revision=progress["revision"] + 1,
+            progress.update(memory=proposal["memory"], revision=progress["revision"] + 1,
                             needs_plan=False, plan_cursor=0, completed_steps=[], proposed_answer="")
             state["events"].append({"type": "visual_plan", "subgoal": progress["subgoal"],
                                     "summary": progress["summary"], "elapsed_ms": call["elapsed_ms"] + call["latency_ms"]})
@@ -423,7 +462,8 @@ class VisualAgent:
                 return self.decision("REPLAN", None, None, call, "Window or screen dimensions changed during planning")
         output, call = self.request("executor", EXECUTOR,
                                     lambda o: parse_execution(o, progress, len(state["history"]), state["page"]["screen"],
-                                                              self.installed_apps(), page=state["page"]))
+                                                              self.installed_apps() if isinstance(o, dict) and o.get("action") == "OPEN_APP" else (),
+                                                              page=state["page"]))
         progress.update(summary=output["summary"], plan_cursor=output["plan_cursor"])
         progress["completed_steps"].extend(output["completed_steps"])
         progress["subgoal"] = progress["plan"][progress["plan_cursor"]] if progress["plan_cursor"] < len(progress["plan"]) else ""

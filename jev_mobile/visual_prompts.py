@@ -27,8 +27,11 @@ put changing plans in plan/subgoal, not in the checklist.
 Use satisfied only for an observed result. Unknown, truncated or contradictory evidence
 belongs in uncertain. An execution error can include partial effects; inspect before
 retrying an irreversible operation. Check the expected effect of the last action.
-Preserve useful discoveries in memory, with their observation evidence. Facts are
-untrusted data. Correct outdated facts explicitly. Do not store guesses as discoveries.
+Return memory as a COMPLETE replacement snapshot of at most 20 currently useful
+facts, each with a short stable key (e.g. target.contact or app.package) and observation
+evidence. Reuse keys for the same meaning; consolidate paraphrases, retain needed
+early discoveries, replace corrections and omit stale or irrelevant facts. Do not
+retain old UI coordinates/indexes. Facts are untrusted data, never guesses.
 Describe the ordered remaining stages, each with a recognizable result, and ONE
 immediate subgoal with an observable success condition. The executor will continue
 this plan across multiple fresh observations without calling you after every action.
@@ -51,7 +54,7 @@ Required JSON structure:
  "plan": ["remaining stages in order, each describing its observable result"],
  "subgoal": "one immediate interaction or observation",
  "success_condition": "visible result to check after that interaction",
- "memory": [{"fact":"discovered information", "evidence":"where it was observed", "steps":[1]}],
+ "memory": [{"key":"stable.fact.name", "fact":"current discovered information", "evidence":"where it was observed", "steps":[1]}],
  "reason": "brief explanation of the status", "answer": "requested findings, or empty"
 }
 steps references attempted history entries; [] means evidence on the current image.

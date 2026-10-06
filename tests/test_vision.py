@@ -160,16 +160,16 @@ def test_long_handoff_keeps_early_input_and_recent_page_evidence(monkeypatch):
     agent.tick()
     context = json.loads(requests[0]["messages"][1]["content"][0]["text"])
     assert context["attempted_actions"][0]["text"] == "early value"
-    assert len(context["attempted_actions"]) == 14 and len(context["recent_outcomes"]) == 6
+    assert len(context["attempted_actions"]) == 14 and len(context["recent_outcomes"]) == 3
     assert context["recent_outcomes"][-1]["page_after"]["text"] == "Observed page 13"
 
 
 def test_review_rejection_repairs_then_completes_with_memory(monkeypatch):
-    fact = {"fact": "Required value found", "evidence": "Visible label", "steps": []}
+    fact = {"key": "required.value", "fact": "Required value found", "evidence": "Visible label", "steps": []}
     requests = enable(monkeypatch, [
         plan(memory=[fact]), action(point=[500, 500]),
         execution(), review("continue"),
-        plan(), action("TYPE_TEXT", text="new", current_text="old", clear=True),
+        plan(memory=[fact]), action("TYPE_TEXT", text="new", current_text="old", clear=True),
         execution(), review(),
     ])
     monkeypatch.setenv("VISION_PLANNER_MODEL", "planner-model")
@@ -478,7 +478,8 @@ def test_six_actions_follow_one_plan_then_review_actual_before_and_after_images(
     assert [s["index"] for s in agent.state["progress"]["completed_steps"]] == list(range(1, 7))
     for i, request in enumerate(requests[1:7]):
         context = json.loads(request["messages"][1]["content"][0]["text"])
-        assert len(context["attempted_actions"]) == i
+        assert len(context["recent_outcomes"]) == min(i, 2)
+        assert "attempted_actions" not in context
         assert context["progress"]["plan_cursor"] == max(0, i - 1)
         assert context["progress"]["plan"] == stages
     image_urls = lambda r: [p["image_url"]["url"] for p in r["messages"][1]["content"] if p["type"] == "image_url"]
@@ -579,6 +580,47 @@ def test_unexpected_focus_change_invalidates_cached_plan_before_executor(monkeyp
     assert [c["role"] for c in agent.state["model_calls"]] == ["planner", "executor", "planner", "executor"]
     assert len(requests) == 4 and agent.state["progress"]["revision"] == 2
     assert any(e.get("reason") == "focus_changed" for e in agent.state["events"])
+
+
+def test_role_contexts_keep_early_values_but_drop_redundant_audit_payload(monkeypatch):
+    enable(monkeypatch, [])
+    agent = loop.Agent("Keep the supplied recipient and message", device=IndexedVisualDevice([[node(text="Button", clickable=True)]]), vision_only=True)
+    agent.state["history"] = [{"step": i + 1, "operation": "TYPE_TEXT" if i == 0 else "CLICK",
+                               "text": "early required value" if i == 0 else None, "success": i != 0,
+                               "page_after": {"text": "Observed %d" % i, "fingerprint": "audit", "image_file": "audit.png"},
+                               "device_action": {"center": [1, 2], "label": "x" * 4000}} for i in range(14)]
+    queries = []
+    agent.visual.installed_apps = lambda: queries.append(True) or ["com.example.app"]
+    planner, executor, verifier = [agent.visual.context(role) for role in ("planner", "executor", "verifier")]
+    assert len(planner["attempted_actions"]) == len(verifier["attempted_actions"]) == 14
+    assert len(executor["recent_outcomes"]) == 2 and "attempted_actions" not in executor
+    assert executor["entered_values"][0]["text"] == "early required value"
+    assert executor["entered_values"][0]["success"] is False
+    assert "elements" in executor and "elements" not in planner and "elements" not in verifier
+    assert "plan" not in verifier["progress"] and "installed_apps" not in verifier
+    assert not queries and "audit.png" not in json.dumps([planner, executor, verifier])
+    assert "device_action" not in json.dumps(executor)
+    agent.state["progress"].update(plan=["Open target app"], subgoal="Open target app")
+    assert agent.visual.context("executor")["installed_apps"] == ["com.example.app"]
+    assert len(queries) == 1
+
+
+def test_replanning_replaces_memory_snapshot_instead_of_accumulating_paraphrases(monkeypatch):
+    old = {"key": "target.contact", "fact": "Target is Alice", "evidence": "Observed contact", "steps": []}
+    stale = {**old, "key": "old.popup", "fact": "Popup was visible"}
+    corrected = {**old, "fact": "The current target contact is Alice"}
+    enable(monkeypatch, [plan(memory=[old, stale]), action(point=[500, 500]),
+                         execution("replan", completed_steps=[]), plan(memory=[corrected]), action("BACK")])
+    agent = loop.Agent("goal", device=VisualDevice([[node(text="Canvas")]]), vision_only=True)
+    for _ in range(3):
+        agent.tick()
+    assert agent.state["progress"]["memory"] == [corrected]
+    assert agent.trace()["model_calls"][0]["output"]["memory"] == [old, stale]
+    duplicate_text = {**corrected, "key": "another.key", "fact": " THE current  target CONTACT is Alice "}
+    assert len(vision.parse_plan(plan(memory=[corrected, duplicate_text]), 0, [])['memory']) == 1
+    for invalid in ([old, old], [{k: v for k, v in old.items() if k != "key"}], [{**old, "steps": [99]}]):
+        with pytest.raises(ValueError):
+            vision.parse_plan(plan(memory=invalid), 0, [])
 
 
 def test_action_budget_survives_handoff(monkeypatch):
