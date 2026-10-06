@@ -171,25 +171,30 @@ class Device:
             return self._observe_visual()
 
     def _observe_visual(self):
-        image = self._measure("observe_visual.screenshot", self._screencap_bytes)
-        try:
-            prepared = self._measure("observe_visual.image_prepare", visual_images.prepare, image)
-        except (OSError, ValueError) as error:
-            raise RuntimeError("Cannot prepare visual screenshot: %s" % error) from None
-        self.screen = tuple(prepared["screen"])
         app, activity = self._measure("observe_visual.focus", self._focus_app_activity)
         elements, tree_source = [], None
         error = getattr(self, "_visual_a11y_error", None)
-        if not error:
+        # Independent reads share one observation window. Prepare the screenshot
+        # while the optional tree query is in flight, then confirm the window.
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            tree_future = (pool.submit(self._measure, "observe_visual.a11y", self._read_tree, attempts=1)
+                           if not error else None)
+            image = self._measure("observe_visual.screenshot", self._screencap_bytes)
             try:
-                elements, _, tree_source = self._measure("observe_visual.a11y", self._read_tree, attempts=1)
+                prepared = self._measure("observe_visual.image_prepare", visual_images.prepare, image)
+            except (OSError, ValueError) as failure:
+                raise RuntimeError("Cannot prepare visual screenshot: %s" % failure) from None
+            self.screen = tuple(prepared["screen"])
+            if tree_future:
+                try:
+                    elements, _, tree_source = tree_future.result()
+                except (OSError, RuntimeError, ValueError, ParseError) as failure:
+                    # ponytail: stop probing after a failed tree for this run; coordinates
+                    # keep working without repeated slow dumps. Retry on a fresh Device.
+                    error = self._visual_a11y_error = (str(failure) or type(failure).__name__)[:500]
                 if self._measure("observe_visual.confirm_focus", self._focus_app_activity) != (app, activity):
                     elements, tree_source = [], None
-                    error = "Window changed while reading A11Y; indexes unavailable for this image"
-            except (OSError, RuntimeError, ValueError, ParseError) as failure:
-                # ponytail: stop probing after a failed tree for this run; coordinates
-                # keep working without repeated slow dumps. Retry on a fresh Device.
-                error = self._visual_a11y_error = (str(failure) or type(failure).__name__)[:500]
+                    error = "Window changed while observing; indexes unavailable for this image"
         page = snapshot_state(elements, {"app": app, "activity": activity}, "vision", self.screen)
         page.update(a11y_source=tree_source, a11y_error=error,
                     a11y_fingerprint=fingerprint({**page, "text": ""}) if tree_source else None)
@@ -282,7 +287,7 @@ class Device:
 
     def _portal_tree(self) -> Optional[Tuple[List[Dict[str, Any]], Dict[str, Any], str]]:
         for source, state_uri in PORTAL_STATE_URIS:
-            res = self._run("shell", "content", "query", "--uri", state_uri)
+            res = self._measure("a11y.portal_query", self._run, "shell", "content", "query", "--uri", state_uri)
             if res.returncode != 0 or not (res.stdout or "").strip():
                 continue
             row = parse_content_provider_output(res.stdout)
@@ -332,7 +337,7 @@ class Device:
 
     def _screencap_bytes(self) -> bytes:
         for _ in range(3):
-            res = self._run("exec-out", "screencap", "-p", text=False)
+            res = self._measure("capture.screencap", self._run, "exec-out", "screencap", "-p", text=False)
             data = res.stdout or b""
             if res.returncode == 0 and data[:8] == b"\x89PNG\r\n\x1a\n":
                 return data

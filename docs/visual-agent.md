@@ -78,11 +78,13 @@ CLICK 和 LONG_PRESS 可以选择 index 或 point，不能同时给出。TYPE_TE
 
 窗口与尺寸来自过滤后的 dumpsys window displays 默认显示块；cur 是当前逻辑尺寸，不能用固定 wm size 猜测横竖屏。[AOSP DisplayContent 实现](https://android.googlesource.com/platform/frameworks/base/+/f163ffe1a33775ced2526c13a10dafe74c355d56/services/core/java/com/android/server/wm/DisplayContent.java)。厂商输出无法解析时保留完整视觉守卫作为安全回退，并记录 guard.index.fallback；树读取失败直接拒绝编号动作。
 
-设备阶段耗时保存在 trace.device_timings，含 stage、elapsed_ms、duration_ms、success、phase。覆盖截图、图片处理、窗口读取、A11Y、编号守卫，以及输入聚焦、键盘等待、输入法检查、文字传输和等待；失败阶段也记录。startup 表示运行计时开始前的观察。total 包含下属阶段时间，不能把嵌套阶段相加当总耗时；快速观察的并行读取阶段也不能简单相加。
+视觉观察先读取窗口，在同一观察区间内并行获取截图和可选 A11Y 树：主线程处理截图，工作线程读取一次树，结束后再次检查窗口；窗口变化就丢弃编号表。树失败仍按原契约降级坐标操作。规划后的新截图、执行前窗口/编号检查、完成复核的新截图均保留，没有为了性能跳过这些检查。
+
+设备阶段耗时保存在 trace.device_timings，含 stage、elapsed_ms、duration_ms、success、phase。覆盖截图、图片处理、窗口读取、A11Y、编号守卫，以及输入聚焦、键盘等待、输入法检查、文字传输和等待；失败阶段也记录。`capture.screencap` 记录每次截图命令，`a11y.portal_query` 记录每次 Portal 查询，便于区分重试次数与命令耗时。startup 表示运行计时开始前的观察。total 包含下属阶段时间，不能把嵌套阶段相加当总耗时；快速/视觉观察的并行读取阶段也不能简单相加。
 
 每个 tick 还记录 round_timings，包含本轮总耗时、模型耗时、设备阶段覆盖时间、其他开销、请求数、动作数和最终状态，失败/无动作/完成复核的轮次也记录。模型耗时汇总该轮各角色及失败重试；设备时间取已测阶段区间的并集，避免嵌套或并行双计；其他时间是剩余开销，包括未分项测量的处理和额外 action_interval 等等待。运行累计 elapsed 从第一个 tick 开始，初始观察另标 startup，不混入本轮统计。trace.settings 保存运行的动作间隔、截图/模式开关和预算。
 
-CLI 的规划/复核日志标出各自请求耗时，视觉决策明确属于哪个角色；操作行之后输出「本轮总耗时 / 模型 / 设备阶段 / 其他」并在结束时汇总。事件与动作按时间排列，失败退出前也打印尚未显示的诊断。请求记录 context_chars、image_count、request_bytes（按紧凑 UTF-8 JSON 序列化计算的请求正文大小）和 endpoint_host；只保存主机名，不保存端点凭据、查询参数或 API 密钥。字符/请求字节数用于排查输入膨胀，不能视为模型 token 数。
+CLI 的规划/复核日志标出各自请求耗时，视觉决策明确属于哪个角色；操作行之后输出「本轮总耗时 / 模型 / 设备阶段 / 其他」并在结束时汇总。初始化视觉观察耗时另行显示，明确不包含在 elapsed 内，不把其嵌套或并行子阶段重复相加。事件与动作按时间排列，失败退出前也打印尚未显示的诊断。请求记录 context_chars、image_count、request_bytes（按紧凑 UTF-8 JSON 序列化计算的请求正文大小）和 endpoint_host；只保存主机名，不保存端点凭据、查询参数或 API 密钥。字符/请求字节数用于排查输入膨胀，不能视为模型 token 数。
 
 无效、布尔、字符串、负数、不存在的编号和不匹配的输入目标均不执行。A11Y 是附加信息：优先查询现有 Portal，之后最多尝试一次 uiautomator 流式 dump；失败后在当前 Device 实例内停用后续探测并记录 a11y_error，保留截图与坐标操作，避免每轮重复慢重试。重新创建 Device（CLI 重跑任务）会重新尝试。编号动作的执行前复读有额外开销，Portal 可减少此开销。
 

@@ -13,7 +13,7 @@ import jev_mobile.agent as loop
 from jev_mobile import vision, visual_images
 from jev_mobile.a11y import fingerprint, snapshot_state
 from jev_mobile.device import Device
-from jev_mobile.__main__ import format_event, format_step
+from jev_mobile.__main__ import format_event, format_step, format_summary
 from helpers import FakeDevice, make_decision, node
 
 
@@ -751,6 +751,47 @@ def test_device_visual_input_is_independent_of_a11y_and_checks_adb(monkeypatch):
         device.act({"kind": "click", "center": [10, 20]})
 
 
+def test_visual_screenshot_and_tree_overlap_with_window_checks(monkeypatch):
+    from threading import Event
+    device = Device.__new__(Device)
+    tree_started, shot_started = Event(), Event()
+    order = []
+    tree = [node(text="Target", clickable=True)]
+    def focus():
+        order.append("focus")
+        return "com.example", "Main"
+    def screenshot():
+        shot_started.set()
+        assert tree_started.wait(2), "Tree must start while screenshot is in flight"
+        order.append("screenshot")
+        return png()
+    def read_tree(attempts):
+        assert attempts == 1
+        tree_started.set()
+        assert shot_started.wait(2), "Screenshot must start before tree completes"
+        order.append("tree")
+        return tree, {}, "test"
+    monkeypatch.setattr(device, "_focus_app_activity", focus)
+    monkeypatch.setattr(device, "_screencap_bytes", screenshot)
+    monkeypatch.setattr(device, "_read_tree", read_tree)
+    page = device.observe_visual()
+    assert order[0] == order[-1] == "focus" and order.count("focus") == 2
+    assert page["a11y_fingerprint"] and vision.visual_elements(page)[0]["label"] == "Target"
+    assert page["screen"] == [1920, 1080]
+    assert {t["stage"] for t in device.timings} >= {"observe_visual.a11y", "observe_visual.screenshot", "observe_visual.total"}
+
+
+def test_window_change_during_parallel_capture_discards_indexes(monkeypatch):
+    device = Device.__new__(Device)
+    windows = iter([("com.example", "Main"), ("com.other", "Other")])
+    monkeypatch.setattr(device, "_focus_app_activity", lambda: next(windows))
+    monkeypatch.setattr(device, "_screencap_bytes", png)
+    monkeypatch.setattr(device, "_read_tree", lambda attempts: ([node(text="Target", clickable=True)], {}, "test"))
+    page = device.observe_visual()
+    assert page["screenshot"] and page["a11y_fingerprint"] is None and not vision.visual_elements(page)
+    assert "Window changed" in page["a11y_error"]
+
+
 def test_adb_timeout_is_recoverable(monkeypatch):
     device = Device.__new__(Device)
     device.adb_path, device.device = "adb", None
@@ -1068,6 +1109,7 @@ def test_round_timings_measure_all_models_devices_and_completion_with_a_controll
     assert agent.trace()["model_calls"][-1]["request_bytes"] > 0
     assert agent.trace()["model_calls"][-1]["endpoint_host"] == "openrouter.ai"
     assert any(t["phase"] == "startup" for t in agent.trace()["device_timings"])
+    assert "初始化视觉观察 0.5s" in format_summary(agent.snapshot(), False)
     assert "总耗时 6000ms" in format_event({"type": "round_timing", **first})
     assert "复核器请求" in format_event(next(e for e in agent.state["events"]
                                              if e["type"] == "visual_decision" and e["operation"] == "DONE"))

@@ -152,6 +152,11 @@ def format_summary(state: Dict, quiet: bool) -> str:
         rounds = state["round_timings"]
         line += "  累计模型 %.1fs / 设备阶段 %.1fs / 其他 %.1fs" % tuple(
             sum(r[k] for r in rounds) / 1000 for k in ("model_ms", "device_ms", "other_ms"))
+    if not quiet:
+        startup = sum(t["duration_ms"] for t in state.get("device_timings", [])
+                      if t["phase"] == "startup" and t["stage"] == "observe_visual.total")
+        if startup:
+            line += "  初始化视觉观察 %.1fs（不含在 elapsed 中）" % (startup / 1000)
     return line
 
 
