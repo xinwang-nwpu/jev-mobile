@@ -31,3 +31,5 @@ git -C mobilerun-portal checkout cc3fa91b15847ca9f7cc9a5afdd6b8e1db7e4ec2
 
 未迁入：云账号/余额/任务、云回连、HTTP/WebSocket、WebRTC、scrcpy 通道、文件与 APK 管理、短信/联系人/通知触发器、自动更新、自动点击权限弹窗、编号悬浮层、独立保活及 MediaProjection 服务。
 这些功能的依赖与权限也未加入。当前截图和点按/滑动继续使用 jev-mobile 的 ADB 通路。
+
+0.1.4 增补：独立实现精简的本机 HTTP 通道，只监听 loopback，使用随机端口与令牌，通过 ADB 转发访问；新增 Android INTERNET 权限。它复用现有树快照和输入编辑器，不迁入上游 HTTP 服务实现。以上“未迁入 HTTP”是初始裁剪记录，WebSocket 等其他项仍未加入。

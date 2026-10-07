@@ -9,10 +9,8 @@ import android.database.MatrixCursor
 import android.net.Uri
 import android.os.Binder
 import android.os.Process
-import android.util.Base64
 import ai.jev.bridge.BuildConfig
 import ai.jev.bridge.input.BridgeKeyboardIME
-import ai.jev.bridge.input.TextInputResult
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -33,6 +31,8 @@ class BridgeContentProvider : ContentProvider() {
                 "ping" -> "pong"
                 "version" -> JSONObject().put("name", "Jev Bridge").put("version", BuildConfig.VERSION_NAME).put("protocol", 1)
                 "packages" -> packages()
+                "http_info" -> BridgeAccessibilityService.instance?.httpInfo()
+                    ?: error("Enable Jev Bridge accessibility service first")
                 "state_full", "state", "a11y_tree_full", "a11y_tree", "phone_state" -> {
                     val service = BridgeAccessibilityService.instance
                         ?: error("Enable Jev Bridge accessibility service first")
@@ -54,28 +54,9 @@ class BridgeContentProvider : ContentProvider() {
 
     override fun insert(uri: Uri, values: ContentValues?): Uri {
         checkCaller()
-        val keyboard = BridgeKeyboardIME.instance ?: error("Jev Bridge Keyboard is not bound to an input field")
-        val result = when (uri.path?.trim('/')) {
-            "keyboard/input", "keyboard/clear" -> {
-                val clearOnly = uri.path?.endsWith("/clear") == true
-                val encoded = values?.getAsString("base64_text")
-                require(clearOnly || encoded != null) { "base64_text is required" }
-                require((encoded?.length ?: 0) <= 16000) { "Text exceeds the input limit" }
-                val text = if (clearOnly) "" else String(Base64.decode(encoded, Base64.DEFAULT), Charsets.UTF_8)
-                val status = keyboard.input(text, if (clearOnly) true else values?.getAsBoolean("clear") ?: true)
-                when (status) {
-                    TextInputResult.Verified -> "verified"
-                    TextInputResult.AcceptedUnverified -> "accepted_unverified"
-                    else -> error("Text input failed: $status; inspect the field before retrying")
-                }
-            }
-            "keyboard/key" -> {
-                val code = values?.getAsInteger("key_code") ?: error("key_code is required")
-                check(keyboard.key(code)) { "Key event was rejected" }
-                "key_sent"
-            }
-            else -> error("Unknown input endpoint")
-        }
+        val result = BridgeKeyboardIME.execute(uri.path?.trim('/') ?: "",
+            values?.getAsString("base64_text"), values?.getAsBoolean("clear") ?: true,
+            values?.getAsInteger("key_code"))
         return Uri.Builder().scheme("content").authority(context!!.packageName).path("result")
             .appendQueryParameter("status", "success").appendQueryParameter("message", result).build()
     }

@@ -1,11 +1,12 @@
 """ADB device connection: one A11Y observation per snapshot, one input batch per action.
 
-State comes from the Droidrun/Mobilerun Portal content provider when installed, else a
-uiautomator XML dump. App and activity always come from the window focus line so the cheap
+State prefers Jev Bridge HTTP over ADB forwarding, then the Portal content provider,
+then a uiautomator XML dump. App and activity always come from the window focus line so the cheap
 freshness signal and the observed state agree on one source.
 """
 
 import base64
+import http.client
 import json
 import os
 import re
@@ -83,6 +84,9 @@ class Device:
         self._saved_ime: Optional[str] = None
         self._visual_a11y_error: Optional[str] = None
         self.timings = []
+        self._bridge_http_checked = False
+        self._bridge_http = None
+        self._bridge_forward = None
         if prepare_portal:
             try:
                 self._ensure_portal_started()
@@ -287,34 +291,111 @@ class Device:
         return (res.stdout or "").strip().split("=")[-1] or "unknown"
 
     def _portal_tree(self) -> Optional[Tuple[List[Dict[str, Any]], Dict[str, Any], str]]:
+        row = self._bridge_request("GET", "/state_full")
+        if row is not None:
+            state = self._decode_portal_state(row, "jev_bridge")
+            if state is not None:
+                return state
+            self._bridge_http = None
         for source, state_uri in PORTAL_STATE_URIS:
             res = self._measure("a11y.portal_query", self._run, "shell", "content", "query", "--uri", state_uri)
             if res.returncode != 0 or not (res.stdout or "").strip():
                 continue
             row = parse_content_provider_output(res.stdout)
-            if not row:
-                continue
-            data = row.get("data")
-            if data is None and row.get("status") == "success":
-                data = row.get("result")
-            if isinstance(data, str):
-                try:
-                    data = json.loads(data)
-                except ValueError:
-                    continue
-            if not isinstance(data, dict):
-                data = row
-            tree = data.get("a11y_tree")
-            if isinstance(tree, dict):
-                # The full-state endpoint returns one root object instead of a root list.
-                tree = [tree]
-            if not isinstance(tree, list):
-                continue
-            phone_state = data.get("phone_state")
-            if not isinstance(phone_state, dict):
-                phone_state = {}
-            return normalize_tree(tree), phone_state, source
+            state = self._decode_portal_state(row, source)
+            if state is not None:
+                return state
         return None
+
+    @staticmethod
+    def _decode_portal_state(row, source):
+        if not isinstance(row, dict) or row.get("status") == "error":
+            return None
+        data = row.get("data")
+        if data is None and row.get("status") == "success":
+            data = row.get("result")
+        if isinstance(data, str):
+            try:
+                data = json.loads(data)
+            except ValueError:
+                return None
+        if not isinstance(data, dict):
+            data = row
+        tree = data.get("a11y_tree")
+        if isinstance(tree, dict):
+            tree = [tree]
+        if not isinstance(tree, list):
+            return None
+        phone = data.get("phone_state")
+        return normalize_tree(tree), phone if isinstance(phone, dict) else {}, source
+
+    def _connect_bridge_http(self):
+        # One ADB discovery per Device, including old APKs without HTTP support.
+        if getattr(self, "_bridge_http_checked", True):
+            return
+        self._bridge_http_checked = True
+        try:
+            result = self._measure("bridge.http_connect", self._run, "shell", "content", "query",
+                                   "--uri", "content://ai.jev.bridge/http_info")
+            row = parse_content_provider_output(result.stdout or "")
+            info = row.get("result") if isinstance(row, dict) and row.get("status") == "success" else None
+            if not isinstance(info, dict) or info.get("protocol") != 1:
+                return
+            port, token = info.get("port"), info.get("token")
+            if not isinstance(port, int) or not 0 < port < 65536 or not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9_-]{40,100}", token):
+                return
+            forward = self._run("forward", "tcp:0", "tcp:%d" % port)
+            if forward.returncode != 0:
+                return
+            local = int((forward.stdout or "").strip())
+            if not 0 < local < 65536:
+                return
+            self._bridge_forward = local  # This Device owns only the forward it created.
+            self._bridge_http = (local, token)
+        except (OSError, RuntimeError, ValueError):
+            self._bridge_http = None
+
+    def _bridge_request(self, method, path, payload=None):
+        self._connect_bridge_http()
+        endpoint = getattr(self, "_bridge_http", None)
+        if endpoint is None:
+            return None
+        connection = http.client.HTTPConnection("127.0.0.1", endpoint[0], timeout=3)
+        try:
+            try:
+                # A failure before connecting is safe to fall back, including for writes.
+                connection.connect()
+            except OSError:
+                self._bridge_http = None
+                return None
+            try:
+                with self._timed("a11y.http_query" if method == "GET" else "input.http"):
+                    connection.request(method, path,
+                        body=json.dumps(payload).encode("utf-8") if payload is not None else None,
+                        headers={"Authorization": "Bearer " + endpoint[1], "Content-Type": "application/json"})
+                    response = connection.getresponse()
+                    # These rejections occur before the editor is called.
+                    if response.status in (401, 403, 404):
+                        self._bridge_http = None
+                        return None
+                    raw = response.read(8 * 1024 * 1024 + 1)
+                    if len(raw) > 8 * 1024 * 1024:
+                        raise ValueError("Bridge response exceeds limit")
+                    row = json.loads(raw)
+                    if response.status != 200 or not isinstance(row, dict) or row.get("status") != "success":
+                        detail = row.get("message") if isinstance(row, dict) else None
+                        raise ValueError(detail[:300] if isinstance(detail, str) else "Bridge HTTP %d rejected" % response.status)
+                    if method == "POST" and row.get("result") not in ("verified", "accepted_unverified"):
+                        raise ValueError("Bridge input returned an unknown result")
+                    return row
+            except (OSError, ValueError, http.client.HTTPException) as failure:
+                self._bridge_http = None
+                if method == "POST":
+                    raise RuntimeError("Jev Bridge HTTP input failed or its outcome is unknown (%s); inspect the field before retrying."
+                                       % str(failure)[:300]) from None
+                return None
+        finally:
+            connection.close()
 
     def _ensure_portal_started(self) -> None:
         """A freshly installed Portal sits in the stopped state, where Android hides its
@@ -436,6 +517,9 @@ class Device:
         if self._measure("input.portal_ime", self._portal_keyboard_ready):
             # One round trip; the endpoint clears the field itself before typing.
             encoded = base64.b64encode(text.encode("utf-8")).decode("ascii")
+            if getattr(self, "_portal_ime_package", None) == "ai.jev.bridge":
+                if self._bridge_request("POST", "/keyboard/input", {"base64_text": encoded, "clear": True}) is not None:
+                    return
             for uri in PORTAL_KEYBOARD_URIS:
                 res = self._run("shell", "content", "insert", "--uri", uri, "--bind", "base64_text:s:" + encoded)
                 output = (res.stdout or "") + (res.stderr or "")
@@ -466,6 +550,7 @@ class Device:
             # Bound already? Use it. Installed but not bound? Switch to it like the
             # ADB Keyboard path does, so Chinese input works out of the box.
             if current.startswith(PORTAL_IME_PREFIXES):
+                self._portal_ime_package = current.split("/", 1)[0]
                 self._portal_keyboard = True
             else:
                 self._portal_keyboard = self._switch_ime_to_portal()
@@ -484,6 +569,7 @@ class Device:
         if self._run("shell", "ime", "set", portal_ime).returncode != 0:
             # Some builds disable the shell `ime` command entirely.
             return False
+        self._portal_ime_package = portal_ime.split("/", 1)[0]
         previous = (saved.stdout or "").strip()
         if previous and previous != portal_ime and not self._saved_ime:
             self._saved_ime = previous
@@ -523,6 +609,11 @@ class Device:
         return match.group(1) if match else ""
 
     def close(self) -> None:
+        self._bridge_http_checked = True
+        self._bridge_http = None
+        if getattr(self, "_bridge_forward", None) is not None:
+            self._run("forward", "--remove", "tcp:%d" % self._bridge_forward)
+            self._bridge_forward = None
         if self._saved_ime and self._saved_ime != ADB_KEYBOARD:
             self._run("shell", "ime", "set", self._saved_ime)
         self._saved_ime = None

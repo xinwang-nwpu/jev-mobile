@@ -22,8 +22,19 @@ class BridgeAccessibilityService : AccessibilityService() {
     }
     @Volatile private var lastPackage: String? = null
     @Volatile private var lastActivity: String? = null
+    @Volatile private var httpServer: BridgeHttpServer? = null
 
     override fun onServiceConnected() { instance = this }
+
+    @Synchronized internal fun httpInfo(): JSONObject {
+        val server = httpServer ?: BridgeHttpServer(::snapshot).also { httpServer = it }
+        return server.info()
+    }
+
+    @Synchronized private fun stopHttp() {
+        httpServer?.close()
+        httpServer = null
+    }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event?.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
@@ -35,10 +46,12 @@ class BridgeAccessibilityService : AccessibilityService() {
     override fun onInterrupt() {}
     override fun onUnbind(intent: Intent?): Boolean {
         if (instance === this) instance = null
+        stopHttp()
         return super.onUnbind(intent)
     }
     override fun onDestroy() {
         if (instance === this) instance = null
+        stopHttp()
         super.onDestroy()
     }
 

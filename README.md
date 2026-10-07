@@ -88,7 +88,7 @@ python -m jev_mobile --vision-only --task "你的任务"
 
 - **每步只发一次模型请求。** 操作头、所有目标头和「目标是否已达成」的独立判定（noul）共享同一份观察状态，在同一次请求里并行求值。
 - **默认循环不截图。** Jev 消费结构化状态：className、text、contentDescription、resourceId、bounds、checked/selected 等语义属性。
-- **一次 A11Y 读取覆盖全部状态，且三路并行。** 优先读 Jev Bridge（`ai.jev.bridge`），也兼容原 Portal（`com.mobilerun.portal` / `com.droidrun.portal`）：ContentProvider 一条 `content query` 拿到整棵树和手机状态，未安装时回退 `uiautomator dump /dev/tty`（单次往返直接取回 XML）。树、焦点窗口、截图并发执行，一次观察只花最慢一路的时间。
+- **一次 A11Y 读取覆盖全部状态，且三路并行。** 优先读 Jev Bridge（`ai.jev.bridge`），0.1.4+ 自动经 ADB 转发的本机 HTTP 获取整棵树和手机状态，中文输入也复用此通道；采用 Python 标准库，无需额外依赖。不可用时回退 ContentProvider，也兼容原 Portal（`com.mobilerun.portal` / `com.droidrun.portal`）；未安装时回退 `uiautomator dump /dev/tty`。树、焦点窗口、截图并发执行，一次观察只花最慢一路的时间。截图仍走 ADB；已发出的输入请求若结果未知，先重新观察，不自动重放。
 - **廉价的新鲜度守卫。** Jev 和 planned 预测前比较焦点窗口；Jev 接受 DONE/BLOCKED 前比对语义指纹。planned 视觉路径检查焦点窗口，避免用像素完全相等拒绝动画画面；视觉 fast 跳过这些额外检查。
 - **文本按需生成、按路径优化。** 输入框清空在设备端一条 shell 完成（`MOVE_END` + 循环 `DEL`）；中文等非 ASCII 文本走 ADB Keyboard 广播；IME 只在首次输入时切换、结束时恢复。
 - **快路径用语义指纹。** 连续 3 步无变化且非 WAIT，或同一控件在两个状态间反复切换时转入视觉；未启用恢复时停止。视觉用未叠加网格的灰度摘要过滤微小变化，卡住后重规划；动画仍可能被当成变化，全程预算限制持续循环。

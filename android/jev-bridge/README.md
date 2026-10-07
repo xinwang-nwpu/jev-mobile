@@ -2,7 +2,7 @@
 
 `ai.jev.bridge` 是 jev-mobile 的独立 Android 辅助 App，Android 8.0+。源码和 APK 均为 AGPL-3.0-or-later 的派生作品；来源、基线和裁剪明细见 [NOTICE.md](NOTICE.md)。
 
-保留屏幕控件读取、手机状态及中文输入。没有网络服务、云登录、文件管理、短信或联系人读取权限。截图、点击、长按、滑动仍由 Python 客户端通过 ADB 完成。它不是一个新的决策模型。
+保留屏幕控件读取、手机状态及中文输入。HTTP 服务仅监听手机本机，经 ADB 转发访问；没有云登录、文件管理、短信或联系人读取权限。截图、点击、长按、滑动仍由 Python 客户端通过 ADB 完成。它不是一个新的决策模型。
 
 ## 构建与安装
 
@@ -43,11 +43,20 @@ adb shell content insert --uri content://ai.jev.bridge/keyboard/key --bind key_c
 
 `content insert` 需要至少一个 `--bind` 参数，因此清空示例也传入 `clear:b:true`。部分系统不会打印 insert 返回的 URI；命令退出成功后，仍应通过 `state_full` 的输入框文字或截图确认实际效果。空输入框的提示文字作为控件标签保留，不计入已输入内容。
 
+### HTTP 加速（0.1.4+）
+
+Python `Device` 默认自动接入，无需修改配置。首次通过受 UID 保护的 `content://ai.jev.bridge/http_info` 读取 `{port, token, protocol}`；此时按需启动服务，监听 `127.0.0.1` 的随机端口。客户端创建自己的 `adb forward tcp:0 tcp:<port>`，使用标准库 `http.client` 直接访问本机转发端口，不加载 HTTPS 证书或代理配置。
+
+所有 HTTP 请求必须带 `Authorization: Bearer <token>`；令牌随机生成，随服务销毁失效，不写日志。支持 `GET /ping`、`GET /state_full`（可加 `?filter=false`），以及 `POST /keyboard/input`、`/keyboard/clear`、`/keyboard/key`。POST 为 JSON，字段与 content 接口对应：`base64_text`、布尔 `clear`、整数 `key_code`。HTTP 与 content 复用相同的树快照和输入编辑器；截图保持 ADB 通道。关闭无障碍服务时 HTTP 服务随之关闭。
+
+旧 APK、读取失败、连接建立失败、认证或路由拒绝时自动回退 content；本次运行停止反复探测故障 HTTP。输入请求一旦发出后超时、连接中断、结果损坏或编辑器报错，不能确定是否已经写入，此时明确报错要求观察输入框，不自动重复提交。动作后观察与完成复核仍保留。`Device.close()` 清理自己创建的转发并恢复原输入法，不影响其他客户端的转发。
+
 ## 二次开发入口
 
 | 文件 | 作用 |
 | --- | --- |
 | `service/BridgeContentProvider.kt` | ADB 接口与调用方校验 |
+| `service/BridgeHttpServer.kt` | 本机 HTTP、令牌认证、请求限制 |
 | `service/BridgeAccessibilityService.kt` | 服务生命周期、手机状态、树快照 |
 | `core/AccessibilityTreeBuilder.kt` | 保留哪些节点字段 |
 | `core/AccessibilityRootResolver.kt` | 当前窗口和弹窗根选择 |
