@@ -114,6 +114,23 @@ class AccessibilityTreeBuilderTest {
         verify(exactly = 1) { root.recycle() }
     }
 
+    @Test
+    fun buildFullAccessibilityTreeJson_keepsHintAsLabelWithoutTreatingItAsInput() {
+        for ((showingHint, expectedValue) in listOf(true to "", false to "请输入")) {
+            val input = node("editor")
+            configureNode(input, text = "请输入")
+            every { input.isEditable } returns true
+            every { input.isShowingHintText } returns showingHint
+            every { input.hintText } returns "请输入"
+
+            val json = AccessibilityTreeBuilder.buildFullAccessibilityTreeJson(input)!!
+
+            assertEquals(expectedValue, json.getString("text"))
+            assertEquals("请输入", json.getString("contentDescription"))
+            verify(exactly = 1) { input.recycle() }
+        }
+    }
+
     private fun node(name: String): AccessibilityNodeInfo {
         return mockk(name = name, relaxed = true)
     }

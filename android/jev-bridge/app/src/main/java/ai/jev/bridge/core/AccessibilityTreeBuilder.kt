@@ -127,8 +127,11 @@ object AccessibilityTreeBuilder {
                 put("resourceId", node.viewIdResourceName ?: "")
                 put("className", node.className?.toString() ?: "")
                 put("packageName", node.packageName?.toString() ?: "")
-                put("text", node.text?.toString() ?: "")
-                put("contentDescription", node.contentDescription?.toString() ?: "")
+                // Android exposes the placeholder as node.text when an editor is empty.
+                // Keep that hint as a label, not as the value the agent thinks it entered.
+                put("text", if (node.isEditable && node.isShowingHintText) "" else node.text?.toString() ?: "")
+                put("contentDescription", node.contentDescription?.toString()
+                    ?: if (node.isEditable) node.hintText?.toString() ?: "" else "")
                 put("boundsInScreen", JSONObject().apply {
                     put("left", rect.left); put("top", rect.top)
                     put("right", rect.right); put("bottom", rect.bottom)

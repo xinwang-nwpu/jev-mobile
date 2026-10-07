@@ -473,8 +473,9 @@ class Device:
 
     def _switch_ime_to_portal(self) -> bool:
         listed = self._run("shell", "ime", "list", "-s")
+        installed = (listed.stdout or "").split()
         portal_ime = next(
-            (ime for ime in (listed.stdout or "").split() if ime.startswith(PORTAL_IME_PREFIXES)),
+            (ime for prefix in PORTAL_IME_PREFIXES for ime in installed if ime.startswith(prefix)),
             None,
         )
         if portal_ime is None:
@@ -517,7 +518,8 @@ class Device:
 
     def _current_ime(self) -> str:
         res = self._shell("dumpsys input_method")
-        match = re.search(r"mCurMethodId=(\S+)", res.stdout or "")
+        # Android 16 reports the bound IME as mCurId; selected and bound may differ.
+        match = re.search(r"\b(?:mCurMethodId|mCurId)=(\S+)", res.stdout or "")
         return match.group(1) if match else ""
 
     def close(self) -> None:

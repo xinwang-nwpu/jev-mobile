@@ -183,6 +183,40 @@ def test_portal_ime_is_switched_when_not_current(monkeypatch, package, ime_class
     assert device._saved_ime == "com.baidu.input_oppo/.ImeService"
 
 
+def test_android16_bound_bridge_is_used_without_switching_to_legacy(monkeypatch):
+    device = bare_device(monkeypatch, None)
+    calls = []
+    dump = ("mSelectedMethodId=com.mobilerun.portal/.input.MobilerunKeyboardIME\n"
+            "mCurId=ai.jev.bridge/.input.BridgeKeyboardIME\n")
+    monkeypatch.setattr(device, "_shell", lambda command: subprocess.CompletedProcess(command, 0, dump, ""))
+    def run(*args):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, "", "")
+    monkeypatch.setattr(device, "_run", run)
+
+    device._send_text("你好")
+
+    assert len(calls) == 1
+    assert calls[0][4] == "content://ai.jev.bridge/keyboard/input"
+    assert device._saved_ime is None
+
+
+def test_bridge_switch_is_preferred_over_legacy_listing_order(monkeypatch):
+    device = bare_device(monkeypatch, None)
+    calls = []
+    def run(*args):
+        calls.append(args)
+        listed = ("com.mobilerun.portal/.input.MobilerunKeyboardIME\n"
+                  "ai.jev.bridge/.input.BridgeKeyboardIME\n") if args[1:3] == ("ime", "list") else ""
+        return subprocess.CompletedProcess(args, 0, listed, "")
+    monkeypatch.setattr(device, "_run", run)
+    monkeypatch.setattr(device, "_shell", lambda command: subprocess.CompletedProcess(command, 0, "com.baidu.input_oppo/.ImeService", ""))
+
+    assert device._switch_ime_to_portal()
+    assert ("shell", "ime", "set", "ai.jev.bridge/.input.BridgeKeyboardIME") in calls
+    assert device._saved_ime == "com.baidu.input_oppo/.ImeService"
+
+
 def test_stopped_portal_app_is_launched_once(monkeypatch):
     monkeypatch.setattr(device_module.time, "sleep", lambda s: None)
     device = bare_device(monkeypatch, None)
