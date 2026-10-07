@@ -48,13 +48,12 @@ class MainActivity : Activity() {
         brand.addView(label("Jev Bridge", 21, ink, true).apply { setPadding(dp(12), 0, 0, 0) }, weighted())
         brand.addView(button("关于", soft, ink) { showAbout() }, LinearLayout.LayoutParams(dp(64), dp(48)))
         page.addView(brand)
-        page.addView(label("让手机，接上你的智能体。", 14, muted), spaced(12))
         val hero = column().apply {
             background = rounded(ink, 28)
             setPadding(dp(20), dp(20), dp(20), dp(20))
         }
         val heroTop = row()
-        heroTop.addView(label("LOCAL BRIDGE", 11, Color.rgb(166, 193, 177), true), weighted())
+        heroTop.addView(label("设备状态", 12, Color.rgb(166, 193, 177), true), weighted())
         progress = label("0 / 2 项已就绪", 12, Color.rgb(216, 235, 207), true).apply {
             background = rounded(Color.rgb(46, 70, 59), 12)
             setPadding(dp(12), dp(8), dp(12), dp(8))
@@ -110,7 +109,7 @@ class MainActivity : Activity() {
             .enabledInputMethodList.any { it.packageName == packageName }
         val count = (if (connected) 1 else 0) + (if (selected) 1 else 0)
         heading.text = if (count == 2) "设备已就绪" else "完成连接准备"
-        summary.text = if (count == 2) "一切就绪，可以从电脑开始任务。" else "完成两项设置，即可从电脑开始任务。"
+        summary.text = if (count == 2) "可在电脑上运行 jev-mobile。" else "请开启屏幕读取和文字输入。"
         progress.text = "$count / 2 项已就绪"
         a11yState.text = if (connected) "已连接" else "待开启"
         imeState.text = if (selected) "已选中" else if (enabled) "待选择" else "待启用"
