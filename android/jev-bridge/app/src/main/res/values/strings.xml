@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Jev Bridge</string>
+    <string name="keyboard_name">Jev Bridge Keyboard</string>
+    <string name="accessibility_description">为 jev-mobile 读取当前屏幕的控件和手机状态。只通过已授权的 ADB 连接使用。</string>
+    <string name="intro">连接手机与 jev-mobile 的本地助手。\n提供屏幕控件读取和中文输入，不连接云服务。</string>
+    <string name="a11y_settings">启用无障碍服务</string>
+    <string name="ime_settings">启用 Jev Bridge 输入法</string>
+    <string name="ime_picker">选择输入法</string>
+    <string name="switch_keyboard">切换输入法</string>
+    <string name="source">查看项目源码</string>
+    <string name="license">开源许可与来源</string>
+    <string name="status">无障碍服务：%1$s\nJev Bridge 输入法：%2$s</string>
+    <string name="enabled">已连接</string>
+    <string name="disabled">未连接</string>
+    <string name="selected">已选中</string>
+    <string name="not_selected">未选中</string>
+    <string name="no_handler">当前系统没有可打开此页面的应用</string>
+</resources>

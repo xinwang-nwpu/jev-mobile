@@ -1,6 +1,9 @@
 """Tree-source selection: a portal without interaction flags falls back to uiautomator."""
 
 import subprocess
+import json
+
+import pytest
 
 import jev_mobile.device as device_module
 from jev_mobile.device import Device, _tree_has_interaction_flags
@@ -114,11 +117,47 @@ def test_portal_state_full_uri_is_preferred():
     from jev_mobile.a11y import PORTAL_STATE_URIS
 
     uris = [uri for _, uri in PORTAL_STATE_URIS]
+    assert uris[0] == "content://ai.jev.bridge/state_full"
     assert uris.index("content://com.mobilerun.portal/state_full") < uris.index("content://com.mobilerun.portal/state")
     assert "content://com.droidrun.portal/state_full" in uris
 
 
-def test_portal_ime_is_switched_when_not_current(monkeypatch):
+def test_jev_bridge_state_contract_reaches_indexed_actions(monkeypatch):
+    from jev_mobile.a11y import snapshot_state
+    from jev_mobile.model import action_space
+    device = Device.__new__(Device)
+    calls = []
+    tree = {"className": "android.widget.EditText", "resourceId": "app:id/input",
+            "text": "你好", "contentDescription": "", "packageName": "com.example",
+            "boundsInScreen": {"left": 10, "top": 100, "right": 400, "bottom": 200},
+            "isClickable": True, "isEditable": True, "isEnabled": True, "children": []}
+    result = {"status": "success", "result": {"a11y_tree": tree,
+              "phone_state": {"keyboardVisible": True}, "device_context": {"screenWidth": 1080}}}
+    def query(*args):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, "Row: 0 result=" + json.dumps(result, ensure_ascii=False), "")
+    monkeypatch.setattr(device, "_run", query)
+    nodes, phone, source = device._portal_tree()
+    page = snapshot_state(nodes, {"app": "com.example", "activity": "Chat"}, source, (1080, 2340))
+    _, targets, _ = action_space(page["actions"])
+    assert source == "jev_bridge" and phone["keyboardVisible"]
+    assert len(calls) == 1 and calls[0][-1] == "content://ai.jev.bridge/state_full"
+    assert targets["TYPE_TEXT"]["1"]["value"] == "你好"
+    assert targets["CLICK"]["1"]["center"] == [205, 150]
+
+
+def test_keyboard_error_uri_cannot_be_mistaken_for_success(monkeypatch):
+    device = bare_device(monkeypatch, None)
+    device._portal_keyboard = True
+    monkeypatch.setattr(device, "_run", lambda *args: subprocess.CompletedProcess(
+        args, 0, "Inserted content://ai.jev.bridge/result?status=error&message=No%20input%20connection", ""))
+    with pytest.raises(RuntimeError, match="inspect the field"):
+        device._send_text("你好")
+
+
+@pytest.mark.parametrize("package,ime_class", [("ai.jev.bridge", "BridgeKeyboardIME"),
+                                             ("com.mobilerun.portal", "MobilerunKeyboardIME")])
+def test_portal_ime_is_switched_when_not_current(monkeypatch, package, ime_class):
     device = bare_device(monkeypatch, None)
     calls = []
 
@@ -128,7 +167,7 @@ def test_portal_ime_is_switched_when_not_current(monkeypatch):
         if "dumpsys" in joined:
             return subprocess.CompletedProcess(args=list(args), returncode=0, stdout="mCurMethodId=com.baidu.input_oppo/.ImeService", stderr="")
         if "ime" in joined and "list" in joined:
-            return subprocess.CompletedProcess(args=list(args), returncode=0, stdout="com.mobilerun.portal/.input.MobilerunKeyboardIME", stderr="")
+            return subprocess.CompletedProcess(args=list(args), returncode=0, stdout=package + "/.input." + ime_class, stderr="")
         if "settings" in joined:
             return subprocess.CompletedProcess(args=list(args), returncode=0, stdout="com.baidu.input_oppo/.ImeService", stderr="")
         return subprocess.CompletedProcess(args=list(args), returncode=0, stdout="", stderr="")
@@ -137,7 +176,7 @@ def test_portal_ime_is_switched_when_not_current(monkeypatch):
     monkeypatch.setattr(device, "_shell", lambda cmd: fake_run("shell", cmd))
     device._send_text("龙卷风", delete=0)
     # The portal IME is installed but not bound, so it is switched to before inserting.
-    assert any("ime set com.mobilerun.portal" in c for c in calls)
+    assert any("ime set " + package in c for c in calls)
     inserts = [c for c in calls if c.startswith("shell content insert")]
     assert len(inserts) == 1 and "keyboard/input" in inserts[0]
     # The user's original IME is remembered for close() to restore.

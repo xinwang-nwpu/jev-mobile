@@ -18,6 +18,8 @@ MAX_LABEL_CHARS = 80
 EDITABLE_CLASS_HINTS = ("EditText", "AutoCompleteTextView")
 
 PORTAL_STATE_URIS = (
+    ("jev_bridge", "content://ai.jev.bridge/state_full"),
+    ("jev_bridge", "content://ai.jev.bridge/state"),
     ("mobilerun_portal", "content://com.mobilerun.portal/state_full"),
     ("mobilerun_portal", "content://com.mobilerun.portal/state"),
     ("droidrun_portal", "content://com.droidrun.portal/state_full"),

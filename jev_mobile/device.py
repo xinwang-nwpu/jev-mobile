@@ -30,9 +30,10 @@ from .a11y import (
 ADB_KEYBOARD = "com.android.adbkeyboard/.AdbIME"
 # The portal's own IME serves the keyboard/input insert endpoint through its live
 # InputConnection, so text works even where the shell `ime` command is disabled.
-PORTAL_PACKAGES = ("com.mobilerun.portal", "com.droidrun.portal")
-PORTAL_IME_PREFIXES = ("com.mobilerun.portal/", "com.droidrun.portal/")
+PORTAL_PACKAGES = ("ai.jev.bridge", "com.mobilerun.portal", "com.droidrun.portal")
+PORTAL_IME_PREFIXES = tuple(package + "/" for package in PORTAL_PACKAGES)
 PORTAL_KEYBOARD_URIS = (
+    "content://ai.jev.bridge/keyboard/input",
     "content://com.mobilerun.portal/keyboard/input",
     "content://com.droidrun.portal/keyboard/input",
 )
@@ -437,16 +438,17 @@ class Device:
             encoded = base64.b64encode(text.encode("utf-8")).decode("ascii")
             for uri in PORTAL_KEYBOARD_URIS:
                 res = self._run("shell", "content", "insert", "--uri", uri, "--bind", "base64_text:s:" + encoded)
-                if res.returncode == 0 and "Error" not in (res.stdout or "") + (res.stderr or ""):
+                output = (res.stdout or "") + (res.stderr or "")
+                if res.returncode == 0 and "Error" not in output and "status=error" not in output:
                     return
-            raise RuntimeError("Portal keyboard input failed; nothing typed.")
+            raise RuntimeError("Jev Bridge / Portal keyboard input failed; inspect the field before retrying.")
         if self._measure("input.adb_ime", self._use_adb_keyboard):
             self._delete_chars(delete)
             escaped = text.replace("'", "'\\''")
             self._checked("shell", "am broadcast -a ADB_INPUT_TEXT --es msg '%s'" % escaped)
             return
         if not re.fullmatch(r"[ -~]+", text):
-            raise RuntimeError("Non-ASCII text needs the Portal keyboard or ADB Keyboard installed on the device.")
+            raise RuntimeError("Non-ASCII text needs Jev Bridge, the Portal keyboard or ADB Keyboard installed on the device.")
         self._delete_chars(delete)
         safe = text.replace("%", "%%").replace(" ", "%s")
         self._checked("shell", "input text '%s'" % safe.replace("'", "'\\''"))

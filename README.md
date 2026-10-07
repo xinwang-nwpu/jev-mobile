@@ -88,7 +88,7 @@ python -m jev_mobile --vision-only --task "你的任务"
 
 - **每步只发一次模型请求。** 操作头、所有目标头和「目标是否已达成」的独立判定（noul）共享同一份观察状态，在同一次请求里并行求值。
 - **默认循环不截图。** Jev 消费结构化状态：className、text、contentDescription、resourceId、bounds、checked/selected 等语义属性。
-- **一次 A11Y 读取覆盖全部状态，且三路并行。** 优先读 Portal（`com.mobilerun.portal` / `com.droidrun.portal` 的 ContentProvider，一条 `content query` 拿到整棵树和手机状态），未安装时回退 `uiautomator dump /dev/tty`（单次往返直接取回 XML）。树、焦点窗口、截图并发执行，一次观察只花最慢一路的时间。
+- **一次 A11Y 读取覆盖全部状态，且三路并行。** 优先读 Jev Bridge（`ai.jev.bridge`），也兼容原 Portal（`com.mobilerun.portal` / `com.droidrun.portal`）：ContentProvider 一条 `content query` 拿到整棵树和手机状态，未安装时回退 `uiautomator dump /dev/tty`（单次往返直接取回 XML）。树、焦点窗口、截图并发执行，一次观察只花最慢一路的时间。
 - **廉价的新鲜度守卫。** Jev 和 planned 预测前比较焦点窗口；Jev 接受 DONE/BLOCKED 前比对语义指纹。planned 视觉路径检查焦点窗口，避免用像素完全相等拒绝动画画面；视觉 fast 跳过这些额外检查。
 - **文本按需生成、按路径优化。** 输入框清空在设备端一条 shell 完成（`MOVE_END` + 循环 `DEL`）；中文等非 ASCII 文本走 ADB Keyboard 广播；IME 只在首次输入时切换、结束时恢复。
 - **快路径用语义指纹。** 连续 3 步无变化且非 WAIT，或同一控件在两个状态间反复切换时转入视觉；未启用恢复时停止。视觉用未叠加网格的灰度摘要过滤微小变化，卡住后重规划；动画仍可能被当成变化，全程预算限制持续循环。
@@ -169,8 +169,8 @@ python -m jev_mobile --task "打开设置，把飞行模式开关打开" --start
 
 ### 可选加速件
 
-- 设备安装 Droidrun / Mobilerun Portal —— A11Y 读取的主要加速手段（实测约 1s → 100ms~1s 量级，取决于设备与 Portal 版本）；未装时自动回退 `uiautomator dump`（部分设备单次数秒，仅保功能可用）；
-- 设备安装 [ADB Keyboard](https://github.com/senzhk/ADBKeyBoard) —— 支持中文输入，未安装时只能输 ASCII。
+- 设备安装 [Jev Bridge](android/jev-bridge/README.md)，打开 App 并启用无障碍服务与 Jev Bridge Keyboard，即可提供快速控件读取及中文输入；也兼容原 Droidrun / Mobilerun Portal。未装辅助 App 时自动回退 `uiautomator dump`（部分设备单次数秒）。
+- 中文输入也可使用 [ADB Keyboard](https://github.com/senzhk/ADBKeyBoard) 作为备用。Jev Bridge、Portal 输入法和 ADB Keyboard 均不可用时只能输入 ASCII。
 
 ### 常见问题
 
@@ -178,9 +178,9 @@ python -m jev_mobile --task "打开设置，把飞行模式开关打开" --start
 | --- | --- |
 | `adb devices` 显示 `unauthorized` | 在手机弹窗上允许调试；仍不行则在开发者选项里「撤销 USB 调试授权」后重插 |
 | 报 `TYPESAFE_API_KEY is missing` | `.env` 没创建或没填 Key，确认它在运行目录下 |
-| 每步观察前卡约 1s | 未装 Portal 时走 uiautomator 回退路径（慢）；设备安装 Portal 即可加速 |
+| 每步观察前卡约 1s | 检查 Jev Bridge 无障碍服务是否启用；未装辅助 App 时走 uiautomator 回退路径 |
 | 已装 Portal，每步仍多约 1s | 这是逐帧截图；加 `--no-screenshots` 跳过截图、只留 `trace.json` |
-| 中文输不进去 | 设备安装 ADB Keyboard（见上） |
+| 中文输不进去 | 在 Jev Bridge 中启用并选择输入法，或使用 ADB Keyboard |
 
 ## 使用
 
