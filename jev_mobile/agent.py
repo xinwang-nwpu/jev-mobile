@@ -302,7 +302,7 @@ class Agent:
         state = self.state
         if state["started_at"] is None:
             state["started_at"] = time.perf_counter()
-        if self.device.activity_changed(state["page"]):
+        if not (state["mode"] == "vision" and self.visual.fast) and self.device.activity_changed(state["page"]):
             state["events"].append({"type": "reobserve", "reason": "focus_changed", "elapsed_ms": self._elapsed()})
             if state["mode"] == "vision":
                 state["progress"]["needs_plan"] = not self.visual.fast
@@ -357,10 +357,10 @@ class Agent:
         return True
 
     def _accept_stop(self, status: str) -> Dict[str, Any]:
-        """Accept DONE/BLOCKED only on a fresh screen; a changed page forces a re-decision."""
+        """Visual fast relies on review; other modes check freshness before stopping."""
         state = self.state
-        # ponytail: visual stops check focus; pixel equality rejects animated screens.
-        fresh = (not self.device.activity_changed(state["page"]) if state["mode"] == "vision"
+        # ponytail: planned visual stops check focus; pixel equality rejects animations.
+        fresh = (self.visual.fast or not self.device.activity_changed(state["page"]) if state["mode"] == "vision"
                  else self.device.fresh(state["page"]))
         if not fresh:
             state["status"] = "ready"
@@ -423,12 +423,12 @@ class Agent:
             context = field_context(state["goal"], action, page, state["history"])
             text, helper = field_text(context)
             state["text_calls"].append({**helper, "field": action["label"], "value": text})
-        if state["mode"] == "vision" and self.device.activity_changed(page):
-            state["events"].append({"type": "reobserve", "reason": "focus_changed", "elapsed_ms": self._elapsed()})
-            raise StalePage("Window changed before visual execution")
-        if state["mode"] == "vision" and "index" in action:
-            fresh = self.device.fresh_index(page, action) if self.visual.fast else self.device.fresh_index(page)
-            if not fresh:
+        # ponytail: fast trusts snapshot coordinates; use planned for freshness guards.
+        if state["mode"] == "vision" and not self.visual.fast:
+            if self.device.activity_changed(page):
+                state["events"].append({"type": "reobserve", "reason": "focus_changed", "elapsed_ms": self._elapsed()})
+                raise StalePage("Window changed before visual execution")
+            if "index" in action and not self.device.fresh_index(page):
                 state["events"].append({"type": "reobserve", "reason": "a11y_index_stale", "elapsed_ms": self._elapsed()})
                 raise StalePage("A11Y target changed since the indexed decision; choose from a new snapshot")
         execution_error = None

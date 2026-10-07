@@ -934,46 +934,35 @@ def test_fast_visual_recovers_without_a_planner_and_review_can_reject_completion
     assert context["progress"]["feedback"]["kind"] == "execution_error"
 
 
-def test_fast_visual_discards_changed_index_and_refreshes_without_planning(monkeypatch):
-    requests = enable(monkeypatch, [action(index=1), action(point=[500, 500])])
-    device = IndexedVisualDevice([[node(text="Original", clickable=True)]])
+@pytest.mark.parametrize("output", [
+    action(index=1), action("LONG_PRESS", index=1),
+    action("TYPE_TEXT", index=1, text="你好", clear=True), action(point=[500, 500]),
+])
+def test_fast_visual_executes_without_any_freshness_guards_and_keeps_review(monkeypatch, output):
+    requests = enable(monkeypatch, [output, execution(), review()])
+    device = IndexedVisualDevice([[node(cls="android.widget.EditText", text="Original", clickable=True)]])
+    def forbidden_guard(*args, **kwargs):
+        pytest.fail("Visual fast must not check the page, window, dimensions or target before execution")
+    monkeypatch.setattr(device, "activity_changed", forbidden_guard)
+    monkeypatch.setattr(device, "fresh_index", forbidden_guard)
+    monkeypatch.setattr(device, "fresh", forbidden_guard)
+    monkeypatch.setattr(device, "_index_window", forbidden_guard)
     post = vision.post_json
     def changed_target(*args, **kwargs):
         result = post(*args, **kwargs)
-        device.trees[0] = [node(text="Replacement", clickable=True)]
+        device.trees[0] = [node(text="Replacement", clickable=True, bounds="[400,300][800,400]")]
         return result
     monkeypatch.setattr(vision, "post_json", changed_target)
     agent = loop.Agent("goal", device=device, vision_only=True, vision_mode="fast")
     agent.tick()
-    assert not device.acts and agent.state["status"] == "ready" and device.visual_reads == 2
-    assert "A11Y 点击目标或编号变化" in format_event(agent.state["events"][-2])
+    assert len(device.acts) == 1 and agent.state["status"] == "ready" and device.visual_reads == 2
+    assert device.acts[0][0]["center"] == ([200, 150] if "index" in output else [540, 1170])
+    if output["action"] == "TYPE_TEXT":
+        assert device.acts[0][1] == "你好"
     agent.tick()
-    assert len(device.acts) == 1 and len(requests) == 2
-    assert [c["role"] for c in agent.state["model_calls"]] == ["executor", "executor"]
-
-
-def test_target_guard_checks_value_geometry_identity_window_and_fallback(monkeypatch):
-    original = node(cls="android.widget.EditText", text="old", clickable=True)
-    unrelated = node(text="未读2", clickable=True, bounds="[700,100][900,200]")
-    device = IndexedVisualDevice([[original, unrelated]])
-    page = device.observe_visual()
-    _, fill, _ = vision.parse_action(action("TYPE_TEXT", index=1, text="new", clear=False), page["screen"], page=page)
-    unrelated["text"] = "未读3"
-    assert device.fresh_index(page, fill) and not device.fresh_index(page)
-    for changed in ({**original, "text": "different"}, {**original, "bounds": "[400,100][800,200]"},
-                    {**original, "className": "android.widget.TextView"},
-                    {**original, "enabled": False}):
-        device.trees[0] = [changed, unrelated]
-        assert not device.fresh_index(page, fill)
-    device.trees[0] = [original, unrelated]
-    window = device._index_window()
-    windows = iter([window, ("com.other", "Other", window[2])])
-    monkeypatch.setattr(device, "_index_window", lambda: next(windows))
-    assert not device.fresh_index(page, fill)
-    monkeypatch.setattr(device, "_index_window", lambda: None)
-    assert device.fresh_index(page, fill)  # Fallback also compares just the selected target.
-    device.trees[0] = [unrelated, original]
-    assert not device.fresh_index(page, fill)
+    assert agent.state["status"] == "done" and len(device.acts) == 1 and len(requests) == 3
+    assert [c["role"] for c in agent.state["model_calls"]] == ["executor", "executor", "verifier"]
+    assert not any(e["type"] == "reobserve" for e in agent.state["events"])
 
 
 def test_invalid_visual_mode_fails_before_device_start(monkeypatch):

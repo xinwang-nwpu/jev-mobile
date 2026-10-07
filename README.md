@@ -66,7 +66,7 @@ VISION_MODEL=你的视觉模型名
 vision_mode: fast  # planned 为原来的规划模式（默认）
 ```
 
-fast 跳过 Planner，直接由 Executor 看图选择下一步；异常由 Executor 结合新观察与反馈自行恢复。执行前只核对所选 A11Y 目标的编号、位置、类型和值，其他控件变化不会让动作作废。仍读取当前 A11Y 树并检查窗口/尺寸，因此不会省掉这次设备查询；主要减少误拦截和重新规划。完成提议仍由独立 Verifier 对原始任务整体复核，输入和发送仍分步执行。
+fast 跳过 Planner，直接由 Executor 看图选择下一步；异常由 Executor 结合新观察与反馈自行恢复。执行前完全不复读或核对页面、窗口、尺寸及 A11Y 目标，直接使用本轮观察中解析出的坐标执行；预测前也不额外检查焦点。动作后的正常观察和独立 Verifier 完成复核保留，复核后不再额外检查焦点。输入和发送仍分步执行。
 
 planned 模式中，Planner 首次规划后，Executor 根据每轮截图、累计摘要和实际动作结果判断剩余工作，持续执行；程序不维护阶段计数或校验完成阶段编号。出现偏差、失败、卡住、过期动作或完成复核否决时再重规划。正常步骤不重复调用 Planner，Executor 的完成提议也必须经过独立复核。
 
@@ -82,14 +82,14 @@ python -m jev_mobile --vision-only --task "你的任务"
 
 也可配置 `vision_only: true`。提示词位于 `jev_mobile/visual_prompts.py`；默认三种角色共用 `VISION_MODEL`，可通过 `VISION_PLANNER_MODEL` / `VISION_EXECUTOR_MODEL` / `VISION_VERIFIER_MODEL` 分别指定。
 
-视觉路径也提供当前 A11Y 编号表，支持 `{"action":"CLICK","index":1}` 这种目标参数，以及按编号长按/输入；执行动作时，模型实际返回还须包含 status、summary、reason 和 expected_effect。编号复用 Jev 元素表，执行前复读核对，避免旧编号点错新控件。A11Y 不可用时保留坐标操作；一次探测失败后在本次设备连接内停用后续探测，重跑会重新尝试。详见 [编号与坐标执行](docs/visual-agent.md#a11y-编号与坐标共同执行)。
+视觉路径也提供当前 A11Y 编号表，支持 `{"action":"CLICK","index":1}` 这种目标参数，以及按编号长按/输入；执行动作时，模型实际返回还须包含 status、summary、reason 和 expected_effect。编号复用 Jev 元素表，planned 执行前复读核对，fast 直接按本轮观察解析出的目标执行。A11Y 不可用时保留坐标操作；一次探测失败后在本次设备连接内停用后续探测，重跑会重新尝试。详见 [编号与坐标执行](docs/visual-agent.md#a11y-编号与坐标共同执行)。
 
 ## 为什么快
 
 - **每步只发一次模型请求。** 操作头、所有目标头和「目标是否已达成」的独立判定（noul）共享同一份观察状态，在同一次请求里并行求值。
 - **默认循环不截图。** Jev 消费结构化状态：className、text、contentDescription、resourceId、bounds、checked/selected 等语义属性。
 - **一次 A11Y 读取覆盖全部状态，且三路并行。** 优先读 Portal（`com.mobilerun.portal` / `com.droidrun.portal` 的 ContentProvider，一条 `content query` 拿到整棵树和手机状态），未安装时回退 `uiautomator dump /dev/tty`（单次往返直接取回 XML）。树、焦点窗口、截图并发执行，一次观察只花最慢一路的时间。
-- **廉价的新鲜度守卫。** 预测前比较焦点窗口；快路径接受 DONE/BLOCKED 前比对语义指纹。视觉路径检查焦点窗口，避免用像素完全相等拒绝动画画面；同一窗口里的画面变化仍可能让决策过期。
+- **廉价的新鲜度守卫。** Jev 和 planned 预测前比较焦点窗口；Jev 接受 DONE/BLOCKED 前比对语义指纹。planned 视觉路径检查焦点窗口，避免用像素完全相等拒绝动画画面；视觉 fast 跳过这些额外检查。
 - **文本按需生成、按路径优化。** 输入框清空在设备端一条 shell 完成（`MOVE_END` + 循环 `DEL`）；中文等非 ASCII 文本走 ADB Keyboard 广播；IME 只在首次输入时切换、结束时恢复。
 - **快路径用语义指纹。** 连续 3 步无变化且非 WAIT，或同一控件在两个状态间反复切换时转入视觉；未启用恢复时停止。视觉用未叠加网格的灰度摘要过滤微小变化，卡住后重规划；动画仍可能被当成变化，全程预算限制持续循环。
 

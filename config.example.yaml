@@ -33,6 +33,6 @@ vision_fallback: true
 vision_only: false
 
 # 视觉模式：planned = Planner + Executor + 完成复核；fast = Executor + 完成复核。
-# fast 跳过 Planner；执行前只核对本次 A11Y 目标，不比较整个控件表。
+# fast 跳过 Planner；执行前不复读或核对页面、窗口、尺寸及 A11Y 目标。
 # 此选项同时适用于 --vision-only 和 Jev 出现问题后的视觉接管。
 vision_mode: planned
