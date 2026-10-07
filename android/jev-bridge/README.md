@@ -14,7 +14,7 @@ adb install -r .\app\build\outputs\apk\debug\app-debug.apk
 adb shell am start -n ai.jev.bridge/.MainActivity
 ```
 
-打开 App，先启用“Jev Bridge”无障碍服务，再启用并选择“Jev Bridge Keyboard”。输入法在自动化期间占用系统输入位置，底部“切换输入法”按钮可切回日常键盘。新版包名独立，可与原 Portal 同时安装。
+打开 App，通过“屏幕读取”和“文字输入”两张设置卡片启用无障碍服务、启用并选择“Jev Bridge Keyboard”。返回页面后状态自动刷新，两项都就绪时顶部显示“设备已就绪”。选中后，“管理当前输入法”可切换回日常键盘。新版包名独立，可与原 Portal 同时安装。源码和许可入口位于右上角“关于”，主页面只展示连接设置。
 
 部分 Android 系统对侧载 App 的无障碍服务显示“受限设置”；需在系统的 App 详情菜单允许受限设置后才能开启。无障碍与输入法的用户授权不会由 App 静默绕过。
 
