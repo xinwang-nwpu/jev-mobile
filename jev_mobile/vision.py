@@ -289,6 +289,7 @@ class VisualAgent:
         self.state, self.reserve_call = state, reserve_call
         self.capture, self.installed_apps = capture, installed_apps
         self.previous_page = None  # Images stay outside persistent JSON state.
+        self.fast = state["settings"]["vision_mode"] == "fast"
 
     def context(self, role):
         state = self.state
@@ -312,18 +313,20 @@ class VisualAgent:
             "verifier": ("summary", "requirements", "memory", "proposed_answer"),
         }[role]
         context = {
+            "vision_mode": state["settings"]["vision_mode"],
             "goal": state["goal"], "current_page": page_view(state["page"]),
             "recent_outcomes": [outcome(h, True) for h in state["history"][-(2 if role == "executor" else 3):]],
             "progress": {k: progress[k] for k in progress_keys},
             "remaining_actions": max(0, state["action_limit"] - len(state["history"])),
         }
-        if role != "executor":
+        initial_fast = self.fast and not progress["summary"]
+        if role != "executor" or initial_fast:
             context["attempted_actions"] = [outcome(h) for h in state["history"]]
-        else:
+        if role == "executor":
             # Preserve early supplied/read values without resending the whole navigation history.
             context["entered_values"] = [outcome(h) for h in state["history"] if h.get("text")]
             context["elements"] = visual_elements(state["page"])
-        if role == "planner":
+        if role == "planner" or initial_fast:
             context["recovery_reason"] = state["recovery_reason"]
             handoff = state["handoff"]
             context["handoff"] = ({"reason": handoff["reason"], "after_step": handoff["after_step"],
@@ -438,7 +441,13 @@ class VisualAgent:
 
     def decide(self):
         state, progress = self.state, self.state["progress"]
-        if progress["needs_plan"]:
+        if self.fast:
+            # No planning call: the reviewer still checks the entire original request.
+            if not progress["requirements"]:
+                progress["requirements"] = [{"id": "r1", "description": state["goal"],
+                                              "status": "pending", "evidence": "", "steps": []}]
+            progress["needs_plan"] = False
+        if not self.fast and progress["needs_plan"]:
             proposal, call = self.request("planner", PLANNER,
                                           lambda o: parse_plan(o, len(state["history"]), progress["requirements"]))
             progress.update({k: proposal[k] for k in ("summary", "requirements", "plan", "subgoal", "success_condition")})
@@ -513,10 +522,11 @@ class VisualAgent:
 
     def feedback(self, kind, message):
         progress = self.state["progress"]
-        progress["needs_plan"] = True
+        progress["needs_plan"] = not self.fast
         progress["feedback"] = {"kind": kind, "message": message, "step": len(self.state["history"])}
         progress["recoveries"] += 1
         self.state["events"].append({"type": "visual_replan", **progress["feedback"],
+                                    "vision_mode": self.state["settings"]["vision_mode"],
                                     "elapsed_ms": round((time.perf_counter() - self.state["started_at"]) * 1000)
                                     if self.state["started_at"] is not None else self.state["elapsed_ms"]})
         if progress["recoveries"] >= MAX_RECOVERIES:

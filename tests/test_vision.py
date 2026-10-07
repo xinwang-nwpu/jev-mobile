@@ -109,8 +109,9 @@ def test_coordinate_contract_and_focused_append():
     ("stuck", 3, "stuck"), ("cycle", 4, "cycle"),
     ("completion_conflict", 3, "completion_conflict"), ("execution_error", 1, "execution_error"),
 ])
-def test_handoff_preserves_goal_and_full_history(monkeypatch, trigger, steps, expected):
-    requests = enable(monkeypatch, [plan("complete"), review()])
+@pytest.mark.parametrize("vision_mode", ["planned", "fast"])
+def test_handoff_preserves_goal_and_full_history(monkeypatch, trigger, steps, expected, vision_mode):
+    requests = enable(monkeypatch, [execution() if vision_mode == "fast" else plan("complete"), review()])
     button = node(text="Open", clickable=True)
     trees = [[button]]
     if trigger == "cycle":
@@ -130,7 +131,7 @@ def test_handoff_preserves_goal_and_full_history(monkeypatch, trigger, steps, ex
         return make_decision(op, "1" if op == "CLICK" else None, page, goal={"satisfied": False, "probability": 0.1})
 
     monkeypatch.setattr(loop, "choose", fast)
-    agent = loop.Agent("original goal", device=device, screenshots=False)
+    agent = loop.Agent("original goal", device=device, screenshots=False, vision_mode=vision_mode)
     for _ in range(steps):
         agent.tick()
     assert agent.state["mode"] == "vision" and agent.state["recovery_reason"] == expected
@@ -148,6 +149,8 @@ def test_handoff_preserves_goal_and_full_history(monkeypatch, trigger, steps, ex
     assert agent.trace()["decisions"][-1]["evidence"]
     assert agent.trace()["usage"]["decision"]["input_tokens"] == 24
     assert agent.state["answer"] == "Verified result"
+    assert [c["role"] for c in agent.state["model_calls"] if c["role"] != "fast"] == [
+        "executor" if vision_mode == "fast" else "planner", "verifier"]
 
 
 def test_long_handoff_keeps_early_input_and_recent_page_evidence(monkeypatch):
@@ -792,13 +795,14 @@ def test_visual_device_start_does_not_probe_or_launch_portal(monkeypatch):
     assert device.screen == (1080, 1920)
 
 
-def test_cli_visual_only_runs_without_jev_credentials(monkeypatch, tmp_path, capsys):
+@pytest.mark.parametrize("vision_mode", ["planned", "fast"])
+def test_cli_visual_only_runs_without_jev_credentials(monkeypatch, tmp_path, capsys, vision_mode):
     from jev_mobile import __main__ as cli
-    enable(monkeypatch, [plan("complete"), review()])
+    enable(monkeypatch, [execution() if vision_mode == "fast" else plan("complete"), review()])
     monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
     monkeypatch.setattr(cli, "load_env_file", lambda: None)
     config = tmp_path / "task.yaml"
-    config.write_text("task: inspect current state\nvision_only: true\n", encoding="utf-8")
+    config.write_text("task: inspect current state\nvision_only: true\nvision_mode: %s\n" % vision_mode, encoding="utf-8")
     original = cli.Agent
     device = VisualDevice([[node(text="Canvas")]])
     capture = device.observe_visual
@@ -809,6 +813,8 @@ def test_cli_visual_only_runs_without_jev_credentials(monkeypatch, tmp_path, cap
     assert "requests=2" in output and "Verified result" in output
     trace = json.loads((tmp_path / "run" / "trace.json").read_text(encoding="utf-8"))
     assert trace["mode"] == "vision" and trace["status"] == "done"
+    assert trace["settings"]["vision_mode"] == vision_mode
+    assert [c["role"] for c in trace["model_calls"]] == ["executor" if vision_mode == "fast" else "planner", "verifier"]
 
 
 def test_cli_missing_visual_credentials_fails_before_device_or_trace(monkeypatch, tmp_path, capsys):
@@ -871,6 +877,109 @@ class IndexedVisualDevice(VisualDevice, Device):
         pixels = super().observe_visual()
         page = indexed_page(self.trees[min(len(self.acts), len(self.trees) - 1)], self.screen)
         return {**pixels, **page, "fingerprint": pixels["fingerprint"]}
+
+
+def test_fast_visual_input_send_and_review_ignore_unrelated_control_changes(monkeypatch):
+    requests = enable(monkeypatch, [action("TYPE_TEXT", index=1, text="你好", clear=True),
+                                    action(index=2), execution(), review()])
+    field = node(cls="android.widget.EditText", text="", clickable=True)
+    send = node(text="发送", clickable=True, bounds="[500,100][700,200]")
+    notice = node(text="未读2", clickable=True, bounds="[800,100][900,200]")
+    device = IndexedVisualDevice([[field, send, notice],
+                                  [{**field, "text": "你好"}, send, notice],
+                                  [field, send, node(text="已发送你好")]])
+    post = vision.post_json
+    def changed_notice(*args, **kwargs):
+        result = post(*args, **kwargs)
+        notice["text"] = "未读3"
+        return result
+    monkeypatch.setattr(vision, "post_json", changed_notice)
+    agent = loop.Agent("向王鑫发送你好", device=device, vision_only=True, vision_mode="fast")
+    list(agent.run())
+    first_context = json.loads(requests[0]["messages"][1]["content"][0]["text"])
+    assert first_context["elements"][0]["index"] == 1
+    assert "TYPE_TEXT" in first_context["elements"][0]["operations"]
+    assert [c["role"] for c in agent.state["model_calls"]] == ["executor", "executor", "executor", "verifier"]
+    assert [a[0]["kind"] for a in device.acts] == ["fill", "click"] and device.acts[0][1] == "你好"
+    assert agent.state["status"] == "done" and device.visual_reads == 4
+    assert not any(e["type"] in {"visual_plan", "reobserve"} for e in agent.state["events"])
+    final_context = json.loads(requests[-1]["messages"][1]["content"][0]["text"])
+    assert final_context["progress"]["requirements"][0]["description"] == "向王鑫发送你好"
+    assert requests[-1]["messages"][1]["content"][2]["image_url"]["url"].endswith("image-2")
+
+
+def test_fast_visual_recovers_without_a_planner_and_review_can_reject_completion(monkeypatch):
+    requests = enable(monkeypatch, [action(point=[500, 500]), execution("replan"), action("BACK"),
+                                    execution(), review("continue"), execution(), review()])
+    device = VisualDevice([[node(text="Canvas")]])
+    act = device.act
+    def fail_click(target, text=None):
+        if target["kind"] == "click":
+            raise RuntimeError("Tap rejected")
+        act(target, text)
+    device.act = fail_click
+    agent = loop.Agent("goal", device=device, vision_only=True, vision_mode="fast")
+    agent.tick()
+    agent.tick()
+    assert agent.state["status"] == "ready" and device.visual_reads == 3
+    assert "视觉 fast 恢复" in format_event(next(e for e in agent.state["events"] if e["type"] == "visual_replan"))
+    agent.tick()
+    agent.tick()
+    assert agent.state["status"] == "ready"  # Rejected finish does not stop the task.
+    agent.tick()
+    assert agent.state["status"] == "done" and len(requests) == 7
+    assert not any(c["role"] == "planner" for c in agent.state["model_calls"])
+    context = json.loads(requests[1]["messages"][1]["content"][0]["text"])
+    assert context["recent_outcomes"][0]["error"] == "Tap rejected"
+    assert context["progress"]["feedback"]["kind"] == "execution_error"
+
+
+def test_fast_visual_discards_changed_index_and_refreshes_without_planning(monkeypatch):
+    requests = enable(monkeypatch, [action(index=1), action(point=[500, 500])])
+    device = IndexedVisualDevice([[node(text="Original", clickable=True)]])
+    post = vision.post_json
+    def changed_target(*args, **kwargs):
+        result = post(*args, **kwargs)
+        device.trees[0] = [node(text="Replacement", clickable=True)]
+        return result
+    monkeypatch.setattr(vision, "post_json", changed_target)
+    agent = loop.Agent("goal", device=device, vision_only=True, vision_mode="fast")
+    agent.tick()
+    assert not device.acts and agent.state["status"] == "ready" and device.visual_reads == 2
+    assert "A11Y 点击目标或编号变化" in format_event(agent.state["events"][-2])
+    agent.tick()
+    assert len(device.acts) == 1 and len(requests) == 2
+    assert [c["role"] for c in agent.state["model_calls"]] == ["executor", "executor"]
+
+
+def test_target_guard_checks_value_geometry_identity_window_and_fallback(monkeypatch):
+    original = node(cls="android.widget.EditText", text="old", clickable=True)
+    unrelated = node(text="未读2", clickable=True, bounds="[700,100][900,200]")
+    device = IndexedVisualDevice([[original, unrelated]])
+    page = device.observe_visual()
+    _, fill, _ = vision.parse_action(action("TYPE_TEXT", index=1, text="new", clear=False), page["screen"], page=page)
+    unrelated["text"] = "未读3"
+    assert device.fresh_index(page, fill) and not device.fresh_index(page)
+    for changed in ({**original, "text": "different"}, {**original, "bounds": "[400,100][800,200]"},
+                    {**original, "className": "android.widget.TextView"},
+                    {**original, "enabled": False}):
+        device.trees[0] = [changed, unrelated]
+        assert not device.fresh_index(page, fill)
+    device.trees[0] = [original, unrelated]
+    window = device._index_window()
+    windows = iter([window, ("com.other", "Other", window[2])])
+    monkeypatch.setattr(device, "_index_window", lambda: next(windows))
+    assert not device.fresh_index(page, fill)
+    monkeypatch.setattr(device, "_index_window", lambda: None)
+    assert device.fresh_index(page, fill)  # Fallback also compares just the selected target.
+    device.trees[0] = [unrelated, original]
+    assert not device.fresh_index(page, fill)
+
+
+def test_invalid_visual_mode_fails_before_device_start(monkeypatch):
+    monkeypatch.setattr(loop, "Device", lambda *a, **k: pytest.fail("Device must not be started"))
+    with pytest.raises(ValueError, match="vision_mode"):
+        loop.Agent("goal", vision_mode="typo")
 
 
 def test_indexed_targets_share_jev_numbers_and_use_native_bounds():

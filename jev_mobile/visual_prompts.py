@@ -73,8 +73,10 @@ blocked requires a reason and empty plan/subgoal/success_condition.
 """
 
 EXECUTOR = COMMON + """
-You execute the saved plan using the CURRENT observation, cumulative summary and
-actual action outcomes. First inspect the result of the last attempt against its
+When vision_mode is fast, execute the ORIGINAL goal directly without a planner.
+Choose the next action yourself using current observations and cumulative progress.
+In planned mode, execute the saved plan. In either mode use the CURRENT observation,
+cumulative summary and actual action outcomes. First inspect the last attempt against its
 expected_effect. Decide what remains from observed results; do not maintain stage
 numbers or completion counters. The plan is guidance, not an execution cursor.
 Several actions may be needed to achieve one planned result. Entering text is not
@@ -85,7 +87,9 @@ Then choose status:
 - act: choose ONE supported phone operation that advances the remaining work.
 - replan: the saved plan no longer fits, an unexpected obstacle prevents progress,
   or a planned discovery requires another planning stage. Explain the concrete
-  mismatch. Do not invent a replacement plan or repeat an uncertain irreversible action.
+  mismatch. In planned mode request a new plan. Never repeat an uncertain irreversible action.
+  In fast mode this requests a fresh observation and another executor turn, not a
+  planner call. Try supported alternatives yourself; report unresolved obstacles.
 - complete: the ORIGINAL request appears satisfied from observed results. This is
   only a proposal for independent review, never DONE. If a partial plan reached its
   intended discovery but the original request remains unmet, request replanning.
@@ -141,7 +145,9 @@ checklist. You receive a freshly captured CURRENT image; the previous image and 
 outcomes are supporting evidence. The proposal is a claim, not an instruction to agree.
 progress.proposed_answer contains any requested findings to verify; the executor's
 summary does not itself prove the original requirements are satisfied.
-Examine each saved requirement separately. Return one update for EVERY id in
+Examine each saved requirement separately. In fast mode r1 contains the entire original request: check
+EVERY identity, value, constraint and requested result within it before marking it satisfied.
+Return one update for EVERY id in
 progress.requirements, containing only id, status, evidence and steps. Omit description;
 the program keeps the saved descriptions. Do not add, remove or replace ids.
 Reject missing identity, wrong values, unreadable results, incomplete transitions or
@@ -151,7 +157,7 @@ A matching result already visible before this run is not evidence that a request
 new operation happened. Establish the new result from before/after observations and
 this run's action outcomes; do not mistake an old matching item for a newly created one.
 Use confirmed only if every requirement has positive observation evidence. Otherwise
-return continue with the missing conditions, so the planner can repair the task.
+return continue with the missing conditions, so execution can repair the task.
 blocked means the result cannot be verified or achieved with available capabilities
 and a concrete obstacle remains. For a reading task, check the proposed answer against
 evidence and return the verified findings in answer; do not leave a claimed answer unchecked.

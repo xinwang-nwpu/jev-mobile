@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from xml.etree.ElementTree import ParseError
 
 from . import visual_images
+from .model import action_space
 
 from .a11y import (
     PORTAL_STATE_URIS,
@@ -202,25 +203,36 @@ class Device:
         self.last_source = "vision"
         return page
 
-    def fresh_index(self, page: Dict[str, Any]) -> bool:
-        """A number belongs to one semantic snapshot, not to a screen across time."""
+    def fresh_index(self, page: Dict[str, Any], action=None) -> bool:
+        """Check the whole snapshot, or just the selected target in visual fast mode."""
+        def matches(current):
+            if not action:
+                return fingerprint({**current, "text": ""}) == page["a11y_fingerprint"]
+            targets = []
+            for snapshot in (page, current):
+                _, choices, _ = action_space(snapshot["actions"])
+                candidates = (choices.get("TYPE_TEXT", {}) if action["kind"] == "fill" else
+                              {**choices.get("TYPE_TEXT", {}), **choices.get("CLICK", {})})
+                targets.append(candidates.get(str(action["index"])))
+            keys = ("kind", "label", "role", "bounds", "center", "value", "checked")
+            return bool(all(targets) and all(targets[0].get(k) == targets[1].get(k) for k in keys))
+
         with self._timed("guard.index.total"):
             if not page.get("a11y_fingerprint") or getattr(self, "_visual_a11y_error", None):
                 return False
             try:
                 window = self._measure("guard.index.window", self._index_window)
                 if window is None:
-                    # OEM dumps can omit geometry. Preserve the full guard rather
-                    # than guessing rotation from cached wm size.
+                    # OEM dumps can omit geometry; obtain fresh dimensions before checking.
                     fresh = self._measure("guard.index.fallback", self.observe_visual)
                     return bool(fresh.get("a11y_fingerprint") and all(fresh.get(k) == page.get(k) for k in
-                                ("app", "activity", "screen", "a11y_fingerprint")))
+                                ("app", "activity", "screen")) and matches(fresh))
                 app, activity, screen = window
                 if (app, activity) != (page["app"], page["activity"]) or list(screen) != list(page["screen"]):
                     return False
                 elements, _, _ = self._measure("guard.index.a11y", self._read_tree, attempts=1)
                 current = snapshot_state(elements, {"app": app, "activity": activity}, "vision", screen)
-                return (fingerprint({**current, "text": ""}) == page["a11y_fingerprint"]
+                return (matches(current)
                         and self._measure("guard.index.confirm_window", self._index_window) == window)
             except (OSError, RuntimeError, ValueError, ParseError):
                 return False

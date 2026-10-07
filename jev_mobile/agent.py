@@ -74,12 +74,15 @@ class Agent:
         action_interval: float = 0.0,
         vision_fallback: bool = True,
         vision_only: bool = False,
+        vision_mode: str = "planned",
     ):
         task = task.strip() if isinstance(task, str) else ""
         if not task:
             raise ValueError("Supply a task")
         if action_interval < 0:
             raise ValueError("action_interval must be >= 0")
+        if vision_mode not in ("planned", "fast"):
+            raise ValueError("vision_mode must be planned or fast")
         if vision_only and not vision.configured():
             raise ValueError("Vision-only mode needs VISION_MODEL_API_KEY and VISION_MODEL")
         self.action_interval = float(action_interval)
@@ -111,6 +114,7 @@ class Agent:
             round_timings=[],
             settings={"action_interval": self.action_interval, "fast_screenshots": self.screenshots,
                       "vision_only": vision_only, "vision_fallback": self.vision_fallback,
+                      "vision_mode": vision_mode,
                       "action_limit": MAX_STEPS, "model_call_limit": MAX_STEPS * 4},
             action_limit=MAX_STEPS,
             answer="",
@@ -219,7 +223,7 @@ class Agent:
             state["decision"] = None
             state["status"] = "ready"
             if state["mode"] == "vision":
-                state["progress"]["needs_plan"] = True
+                state["progress"]["needs_plan"] = not self.visual.fast
             return self._recover_page()
         except (RuntimeError, ValueError):
             if state["status"] not in {"done", "blocked"} and self._handoff("execution_error"):
@@ -301,7 +305,7 @@ class Agent:
         if self.device.activity_changed(state["page"]):
             state["events"].append({"type": "reobserve", "reason": "focus_changed", "elapsed_ms": self._elapsed()})
             if state["mode"] == "vision":
-                state["progress"]["needs_plan"] = True
+                state["progress"]["needs_plan"] = not self.visual.fast
             state["page"] = self._observe()
             state["elapsed_ms"] = self._elapsed()
             self._record_page()
@@ -387,6 +391,8 @@ class Agent:
         if selected == "REPLAN":
             if state["status"] != "blocked":
                 state["status"] = "ready"
+                if self.visual.fast and decision["role"] != "verifier":
+                    return self._recover_page()
             return self.snapshot()
         goal = decision.get("goal") or {}
         if selected in {"DONE", "BLOCKED"}:
@@ -418,10 +424,13 @@ class Agent:
             text, helper = field_text(context)
             state["text_calls"].append({**helper, "field": action["label"], "value": text})
         if state["mode"] == "vision" and self.device.activity_changed(page):
+            state["events"].append({"type": "reobserve", "reason": "focus_changed", "elapsed_ms": self._elapsed()})
             raise StalePage("Window changed before visual execution")
-        if state["mode"] == "vision" and "index" in action and not self.device.fresh_index(page):
-            state["events"].append({"type": "reobserve", "reason": "a11y_index_stale", "elapsed_ms": self._elapsed()})
-            raise StalePage("A11Y changed since the indexed decision; choose from a new snapshot")
+        if state["mode"] == "vision" and "index" in action:
+            fresh = self.device.fresh_index(page, action) if self.visual.fast else self.device.fresh_index(page)
+            if not fresh:
+                state["events"].append({"type": "reobserve", "reason": "a11y_index_stale", "elapsed_ms": self._elapsed()})
+                raise StalePage("A11Y target changed since the indexed decision; choose from a new snapshot")
         execution_error = None
         try:
             self.device.act(action, text=text)

@@ -31,3 +31,8 @@ vision_fallback: true
 
 # 从第一步开始使用视觉规划/执行/复核，不需要 Jev 或文本模型的密钥。
 vision_only: false
+
+# 视觉模式：planned = Planner + Executor + 完成复核；fast = Executor + 完成复核。
+# fast 跳过 Planner；执行前只核对本次 A11Y 目标，不比较整个控件表。
+# 此选项同时适用于 --vision-only 和 Jev 出现问题后的视觉接管。
+vision_mode: planned

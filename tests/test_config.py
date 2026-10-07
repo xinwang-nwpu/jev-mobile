@@ -54,3 +54,13 @@ def test_non_mapping_file_is_rejected(tmp_path):
     path = write_config(tmp_path, "- a\n- b\n")
     with pytest.raises(ValueError, match="mapping"):
         load_config(str(path))
+
+
+@pytest.mark.parametrize("mode", ["planned", "fast", "typo", "true", "null"])
+def test_visual_mode_selection(tmp_path, mode):
+    path = write_config(tmp_path, "vision_mode: %s\n" % mode)
+    if mode in ("planned", "fast"):
+        assert load_config(str(path))["vision_mode"] == mode
+    else:
+        with pytest.raises(ValueError, match="vision_mode"):
+            load_config(str(path))

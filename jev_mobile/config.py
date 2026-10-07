@@ -26,6 +26,7 @@ DEFAULTS: Dict[str, Any] = {
     "quiet": False,
     "vision_fallback": True,
     "vision_only": False,
+    "vision_mode": "planned",
 }
 
 
@@ -56,6 +57,8 @@ def load_config(path: Optional[str] = None) -> Dict[str, Any]:
     for key in ("vision_fallback", "vision_only"):
         if type(config[key]) is not bool:
             raise ValueError("%s must be true or false" % key)
+    if config["vision_mode"] not in ("planned", "fast"):
+        raise ValueError("vision_mode must be planned or fast")
     if "action_interval" not in explicit:
         # The environment is the fallback only when the file does not set the value.
         try:

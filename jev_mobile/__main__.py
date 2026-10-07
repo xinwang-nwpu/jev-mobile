@@ -85,6 +85,8 @@ def format_event(event: Dict) -> str:
                 adjustments.get(event["retry_action"], event["retry_action"]))
         return line
     if kind == "visual_replan":
+        if event.get("vision_mode") == "fast":
+            return "%s 视觉 fast 恢复 %s：%s" % (elapsed, event["kind"], event["message"])
         return "%s 视觉恢复重规划 %s：%s" % (elapsed, event["kind"], event["message"])
     if kind == "done_vetoed":
         return "%s DONE 被目标判定否决（未达成，等待后重判）goal=%.2f" % (elapsed, event.get("goal_probability") or 0.0)
@@ -95,7 +97,9 @@ def format_event(event: Dict) -> str:
     if kind == "cycle":
         return "%s 检测到循环：反复点击 %s，页面在两个状态间切换 → blocked" % (elapsed, event.get("action", ""))
     if kind == "reobserve":
-        return "%s 焦点窗口变化，重新观察" % elapsed
+        reason = {"focus_changed": "焦点窗口变化", "a11y_index_stale": "A11Y 点击目标或编号变化",
+                  "visual_plan_stale": "规划期间页面变化"}.get(event.get("reason"), "页面变化")
+        return "%s %s，重新观察" % (elapsed, reason)
     return "%s %s" % (elapsed, kind)
 
 
@@ -245,6 +249,7 @@ def main(argv=None) -> int:
             action_interval=interval,
             vision_fallback=config["vision_fallback"] and not args.no_vision_fallback,
             vision_only=vision_only,
+            vision_mode=config["vision_mode"],
         )
     except (OSError, RuntimeError, ValueError) as error:
         print("Cannot start run: %s" % error, file=sys.stderr)

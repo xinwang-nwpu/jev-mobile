@@ -70,6 +70,8 @@ Indexed guards read the current default-display window/geometry and A11Y without
 
 Run the visual workflow from the first observation with `python -m jev_mobile --vision-only --task "Your task"`, or set `vision_only: true`. This needs only the visual key/model. Prompts live in `jev_mobile/visual_prompts.py`; optional `VISION_PLANNER_MODEL`, `VISION_EXECUTOR_MODEL` and `VISION_VERIFIER_MODEL` override the shared model using the same endpoint/key.
 
+Set `vision_mode: fast` in `config.yaml` to skip Planner and let Executor choose each next action directly, including recovery. `vision_mode: planned` preserves the original workflow and is the default. Both visual-only runs and Jev handoffs use this setting. Fast mode checks only the selected A11Y target before execution; unrelated control changes no longer discard the action. It still reads the current tree and checks window/dimensions, so the device query remains. Independent completion verification against the entire original task remains enabled; typing and submitting remain separate actions.
+
 Visual requests also carry current indexed A11Y elements, using the same numbering as Jev. CLICK, LONG_PRESS and TYPE_TEXT support integer index targets; CLICK/LONG_PRESS also accept coordinates, and indexed input reads the field's current value from the snapshot. Indexed actions refresh the tree before dispatch and replan when the table, focus or dimensions changed. A11Y is optional: a failed probe disables further probes on this Device instance while screenshot/coordinate actions continue; a new Device retries. See the [index/coordinate contract](docs/visual-agent.md#a11y-编号与坐标共同执行).
 
 ## Why it moves

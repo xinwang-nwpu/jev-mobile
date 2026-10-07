@@ -7,25 +7,29 @@
 ```mermaid
 flowchart TD
     A[Jev 接管或纯视觉入口] --> B[原目标、共享历史、当前截图]
-    B --> C[Planner：清单、进度、计划、子目标]
+    B -->|planned| C[Planner：清单、进度、计划、子目标]
+    B -->|fast| D[Executor：当前图上的单个动作]
     C -->|继续| D[Executor：当前图上的单个动作]
     D -->|一个动作| E[校验、焦点守卫、ADB 执行]
     E --> F[实际结果与新截图]
     F --> D
-    D -->|计划偏差或需要下一阶段| J[错误反馈与重规划]
+    D -->|偏差或障碍| J[错误反馈]
     D -->|提出完成| G[重新截图，Verifier 逐项复核]
     C -->|提出完成| G[重新截图，Verifier 逐项复核]
     G -->|通过| H[done 与核实后的答案]
     G -->|证据不足| J
     G -->|具体阻碍| I[blocked 与原因]
     C -->|具体阻碍| I[blocked 与原因]
-    E -->|失败或循环| J[错误反馈与重规划]
-    J --> C
+    E -->|失败或循环| J
+    J -->|planned 重规划| C
+    J -->|fast 重新观察| B
 ```
 
 Planner 在首次进入视觉模式时规划，之后只在计划偏差、阶段性发现需要新计划、执行错误、卡住/循环、意外焦点变化、过期动作或完成复核否决时重规划。新规划结束后再次截图，若窗口或横竖屏尺寸已变化则丢弃旧规划并重来；正常续执行使用上个动作后已经获取的最新观察，不再每步重复规划和额外截图。Executor 每轮检查结果并给出一个动作或控制提议；Verifier 只复核结果，不能操作设备。三个角色默认共用 `VISION_MODEL`，也可分别指定。独立复核指职责、提示词和请求独立，并不保证同一模型的错误互不相关。
 
 ### 保存计划与按需重规划
+
+`config.yaml` 的 `vision_mode` 支持 `planned`（默认，原有规划流程）和 `fast`。fast 不调用 Planner，直接用原始目标、当前观察、累计摘要与动作结果执行，首次接管也携带 Jev 的全程精简动作摘要与交接信息。异常反馈给下轮 Executor，必要时重新观察；恢复次数与总预算继续限制循环。完成复核仍保留：程序把原始任务整体保存为 r1，Verifier 检查其中全部条件，不只检查最后一个动作。以下计划与 revision 说明适用于 planned 模式。
 
 `progress.plan` 保存当前版本的计划，作为 Executor 判断下一步的参考。Executor 根据当前截图、累计摘要、近期实际动作结果和已输入内容判断还有哪些工作未完成；程序不维护阶段计数，也不要求报告或校验完成阶段编号。一个计划项可以需要多个动作，命令成功或像素变化不能单独证明目标已达到。
 
@@ -75,9 +79,11 @@ CLICK 和 LONG_PRESS 可以选择 index 或 point，不能同时给出。TYPE_TE
 
 编号在解析时绑定当前编号表指纹，原生 bounds 决定实际操作位置；它不是 Portal/Mobilerun 的原始编号，也不是跨页面稳定标识。执行编号动作前轻量读取默认显示的窗口/逻辑尺寸 → A11Y 表 → 再核对窗口/尺寸，不再重复截图、缩放或编码。窗口或尺寸变化、同一编号换了目标/位置/现值，都丢弃动作并重新观察。未影响编号表的非交互文本或像素动画不会使编号失效。模型调用轨迹保存当前元素表，动作历史保存实际 index、标签、bounds 和绑定指纹。
 
-窗口与尺寸来自过滤后的 dumpsys window displays 默认显示块；cur 是当前逻辑尺寸，不能用固定 wm size 猜测横竖屏。[AOSP DisplayContent 实现](https://android.googlesource.com/platform/frameworks/base/+/f163ffe1a33775ced2526c13a10dafe74c355d56/services/core/java/com/android/server/wm/DisplayContent.java)。厂商输出无法解析时保留完整视觉守卫作为安全回退，并记录 guard.index.fallback；树读取失败直接拒绝编号动作。
+planned 校验整张编号表的语义指纹；fast 只核对本次编号对应的目标类型、标签、位置、现值与勾选状态，不因其他控件文字变化丢弃动作。fast 仍查询当前 A11Y 树，因为设备接口返回整棵树，减少的是误拦截与重规划，不能省掉这次查询。
 
-视觉观察先读取窗口，在同一观察区间内并行获取截图和可选 A11Y 树：主线程处理截图，工作线程读取一次树，结束后再次检查窗口；窗口变化就丢弃编号表。树失败仍按原契约降级坐标操作。规划后的新截图、执行前窗口/编号检查、完成复核的新截图均保留，没有为了性能跳过这些检查。
+窗口与尺寸来自过滤后的 dumpsys window displays 默认显示块；cur 是当前逻辑尺寸，不能用固定 wm size 猜测横竖屏。[AOSP DisplayContent 实现](https://android.googlesource.com/platform/frameworks/base/+/f163ffe1a33775ced2526c13a10dafe74c355d56/services/core/java/com/android/server/wm/DisplayContent.java)。厂商输出无法解析时用完整视觉观察取得最新尺寸，再按当前模式检查整表或所选目标，并记录 guard.index.fallback；树读取失败直接拒绝编号动作。
+
+视觉观察先读取窗口，在同一观察区间内并行获取截图和可选 A11Y 树：主线程处理截图，工作线程读取一次树，结束后再次检查窗口；窗口变化就丢弃编号表。树失败仍按原契约降级坐标操作。planned 保留规划后的新截图；fast 没有规划请求，也没有规划后的额外截图。两种模式都保留执行前窗口/目标检查和完成复核的新截图。
 
 设备阶段耗时保存在 trace.device_timings，含 stage、elapsed_ms、duration_ms、success、phase。覆盖截图、图片处理、窗口读取、A11Y、编号守卫，以及输入聚焦、键盘等待、输入法检查、文字传输和等待；失败阶段也记录。`capture.screencap` 记录每次截图命令，`a11y.portal_query` 记录每次 Portal 查询，便于区分重试次数与命令耗时。startup 表示运行计时开始前的观察。total 包含下属阶段时间，不能把嵌套阶段相加当总耗时；快速/视觉观察的并行读取阶段也不能简单相加。
 
