@@ -5,7 +5,7 @@ import hashlib
 import io
 import os
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 
 
 def prepare(image):
@@ -49,6 +49,40 @@ def prepare(image):
         "screenshot": base64.b64encode(buffer.getvalue()).decode("ascii"),
         "fingerprint": hashlib.sha256(image).hexdigest(), "visual_signature": signature,
     }
+
+
+def annotate(screenshot, elements):
+    """Draw snapshot-local A11Y indexes; preserve raw fingerprints and full-frame geometry."""
+    if not elements:
+        return screenshot
+    with Image.open(io.BytesIO(base64.b64decode(screenshot))) as source:
+        image = source.convert("RGB")
+    width, height = image.size
+    draw = ImageDraw.Draw(image)
+    font = ImageFont.load_default(size=max(14, round(min(width, height) / 40)))
+    palette = ("#E53935", "#1565C0", "#00875A", "#9C27B0", "#BD5900")
+    badges = []
+    for element in elements:
+        bounds = [round(n * ((width, height)[axis % 2] - 1) / 1000)
+                  for axis, n in enumerate(element["bounds"])]
+        left, top, right, bottom = bounds
+        if right <= left or bottom <= top:
+            continue
+        label = str(element["index"])
+        color = palette[(element["index"] - 1) % len(palette)]
+        draw.rectangle(bounds, outline=color, width=2)
+        badges.append((right, top, label, color))
+    # Labels go last so nested bounds cannot paint over their numbers.
+    for right, top, label, color in badges:
+        x0, y0, x1, y1 = draw.textbbox((0, 0), label, font=font)
+        badge_w, badge_h = x1 - x0 + 8, y1 - y0 + 6
+        left = max(0, min(width - badge_w, right - badge_w))
+        top = max(0, min(height - badge_h, top))
+        draw.rounded_rectangle((left, top, left + badge_w - 1, top + badge_h - 1), radius=3, fill=color)
+        draw.text((left + 4 - x0, top + 3 - y0), label, font=font, fill="white")
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return base64.b64encode(buffer.getvalue()).decode("ascii")
 
 
 def difference(before, after):

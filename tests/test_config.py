@@ -64,3 +64,13 @@ def test_visual_mode_selection(tmp_path, mode):
     else:
         with pytest.raises(ValueError, match="vision_mode"):
             load_config(str(path))
+
+
+@pytest.mark.parametrize("value,expected", [("true", True), ("false", False), ('"false"', None), ("1", None), ("null", None)])
+def test_a11y_box_switch_requires_boolean(tmp_path, value, expected):
+    path = write_config(tmp_path, "vision_a11y_boxes: %s\n" % value)
+    if expected is None:
+        with pytest.raises(ValueError, match="vision_a11y_boxes"):
+            load_config(str(path))
+    else:
+        assert load_config(str(path))["vision_a11y_boxes"] is expected

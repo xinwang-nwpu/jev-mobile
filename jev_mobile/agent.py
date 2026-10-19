@@ -75,6 +75,7 @@ class Agent:
         vision_fallback: bool = True,
         vision_only: bool = False,
         vision_mode: str = "planned",
+        vision_a11y_boxes: bool = False,
     ):
         task = task.strip() if isinstance(task, str) else ""
         if not task:
@@ -83,6 +84,8 @@ class Agent:
             raise ValueError("action_interval must be >= 0")
         if vision_mode not in ("planned", "fast"):
             raise ValueError("vision_mode must be planned or fast")
+        if type(vision_a11y_boxes) is not bool:
+            raise ValueError("vision_a11y_boxes must be true or false")
         if vision_only and not vision.configured():
             raise ValueError("Vision-only mode needs VISION_MODEL_API_KEY and VISION_MODEL")
         self.action_interval = float(action_interval)
@@ -115,6 +118,7 @@ class Agent:
             settings={"action_interval": self.action_interval, "fast_screenshots": self.screenshots,
                       "vision_only": vision_only, "vision_fallback": self.vision_fallback,
                       "vision_mode": vision_mode,
+                      "vision_a11y_boxes": vision_a11y_boxes,
                       "action_limit": MAX_STEPS, "model_call_limit": MAX_STEPS * 4},
             action_limit=MAX_STEPS,
             answer="",
@@ -245,15 +249,21 @@ class Agent:
 
     def _observe(self) -> Dict[str, Any]:
         if self.state["mode"] == "vision":
-            return self.device.observe_visual()
+            return self._visual_page()
         try:
             page = self.device.observe(screenshot=self.screenshots)
         except (RuntimeError, ValueError, ParseError):
             if not self._handoff("observation_error"):
                 raise
-            return self.device.observe_visual()
+            return self._visual_page()
         if not any(a["kind"] in {"click", "fill"} for a in page["actions"]) and self._handoff("no_targets"):
-            return self.device.observe_visual()
+            return self._visual_page()
+        return page
+
+    def _visual_page(self):
+        page = self.device.observe_visual()
+        if self.state["settings"]["vision_a11y_boxes"]:
+            page["screenshot"] = visual_images.annotate(page["screenshot"], vision.visual_elements(page))
         return page
 
     def _recover_page(self) -> Dict[str, Any]:
@@ -267,7 +277,7 @@ class Agent:
         return self.snapshot()
 
     def _capture_visual(self):
-        page = self.device.observe_visual()
+        page = self._visual_page()
         self.state["elapsed_ms"] = self._elapsed()
         self._record_page(page)
         return page

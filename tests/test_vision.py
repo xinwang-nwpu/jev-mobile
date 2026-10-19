@@ -680,6 +680,58 @@ def test_image_size_grid_and_noise_threshold(monkeypatch):
     assert visual_images.changed(page, visual_images.prepare(png(size=(1080, 1920))))
 
 
+def test_numbered_boxes_scale_to_model_image_without_changing_raw_evidence(monkeypatch):
+    monkeypatch.setenv("VISION_IMAGE_MAX_SIDE", "960")
+    page = visual_images.prepare(png())
+    before = copy.deepcopy(page)
+    elements = [{"index": 17, "bounds": [125, 250, 375, 750]}]
+    page["screenshot"] = visual_images.annotate(page["screenshot"], elements)
+    with Image.open(io.BytesIO(base64.b64decode(page["screenshot"]))) as rendered:
+        assert rendered.size == (960, 540)
+        assert rendered.getpixel((120, 200)) == (21, 101, 192)  # Index 17's left border.
+        assert rendered.getpixel((200, 404)) == (21, 101, 192)  # Bottom border.
+        assert rendered.getpixel((200, 300)) == (25, 30, 35)  # No opaque fill over content.
+    assert not visual_images.changed(before, page)
+    assert page["fingerprint"] == before["fingerprint"]
+    assert visual_images.annotate(before["screenshot"], []) == before["screenshot"]
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+@pytest.mark.parametrize("has_tree", [True, False])
+def test_visual_boxes_use_current_table_for_initial_and_later_recordings(monkeypatch, tmp_path, enabled, has_tree):
+    enable(monkeypatch, [])
+    device = IndexedVisualDevice([[node(cls="android.widget.EditText", text="", clickable=True),
+                                   node(text="Send", clickable=True, bounds="[500,300][700,400]")]])
+    raw = visual_images.prepare(png(size=device.screen))
+    capture = device.observe_visual
+    def observe():
+        page = {**capture(), **raw}
+        if not has_tree:
+            page["a11y_fingerprint"] = None
+        return page
+    device.observe_visual = observe
+    tables = []
+    original = visual_images.annotate
+    def annotate(screenshot, elements):
+        tables.append(copy.deepcopy(elements))
+        return original(screenshot, elements)
+    monkeypatch.setattr(visual_images, "annotate", annotate)
+    agent = loop.Agent("goal", device=device, vision_only=True, vision_mode="fast",
+                       vision_a11y_boxes=enabled, record_dir=str(tmp_path))
+    first = agent.state["page"]
+    later = agent._capture_visual()
+    if enabled and has_tree:
+        assert [[r["index"] for r in rows] for rows in tables] == [[1, 2], [1, 2]]
+        assert "TYPE_TEXT" in tables[0][0]["operations"]  # Click and fill share a box.
+    else:
+        assert not tables or tables == [[], []]
+    for page in (first, later):
+        assert (page["screenshot"] != raw["screenshot"]) is (enabled and has_tree)
+        assert (tmp_path / page["image_file"]).read_bytes() == base64.b64decode(page["screenshot"])
+        assert page["visual_signature"] == raw["visual_signature"]
+    assert device.visual_reads == 2  # No extra device read for annotations.
+
+
 def test_device_visual_input_is_independent_of_a11y_and_checks_adb(monkeypatch):
     device = Device.__new__(Device)
     monkeypatch.setattr(device, "_screencap_bytes", png)
@@ -802,7 +854,7 @@ def test_cli_visual_only_runs_without_jev_credentials(monkeypatch, tmp_path, cap
     monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
     monkeypatch.setattr(cli, "load_env_file", lambda: None)
     config = tmp_path / "task.yaml"
-    config.write_text("task: inspect current state\nvision_only: true\nvision_mode: %s\n" % vision_mode, encoding="utf-8")
+    config.write_text("task: inspect current state\nvision_only: true\nvision_mode: %s\nvision_a11y_boxes: true\n" % vision_mode, encoding="utf-8")
     original = cli.Agent
     device = VisualDevice([[node(text="Canvas")]])
     capture = device.observe_visual
@@ -814,6 +866,7 @@ def test_cli_visual_only_runs_without_jev_credentials(monkeypatch, tmp_path, cap
     trace = json.loads((tmp_path / "run" / "trace.json").read_text(encoding="utf-8"))
     assert trace["mode"] == "vision" and trace["status"] == "done"
     assert trace["settings"]["vision_mode"] == vision_mode
+    assert trace["settings"]["vision_a11y_boxes"] is True
     assert [c["role"] for c in trace["model_calls"]] == ["executor" if vision_mode == "fast" else "planner", "verifier"]
 
 

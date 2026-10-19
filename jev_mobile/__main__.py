@@ -250,6 +250,7 @@ def main(argv=None) -> int:
             vision_fallback=config["vision_fallback"] and not args.no_vision_fallback,
             vision_only=vision_only,
             vision_mode=config["vision_mode"],
+            vision_a11y_boxes=config["vision_a11y_boxes"],
         )
     except (OSError, RuntimeError, ValueError) as error:
         print("Cannot start run: %s" % error, file=sys.stderr)

@@ -27,6 +27,7 @@ DEFAULTS: Dict[str, Any] = {
     "vision_fallback": True,
     "vision_only": False,
     "vision_mode": "planned",
+    "vision_a11y_boxes": False,
 }
 
 
@@ -54,7 +55,7 @@ def load_config(path: Optional[str] = None) -> Dict[str, Any]:
     config["action_interval"] = float(config.get("action_interval") or 0)
     config["screenshots"] = bool(config.get("screenshots"))
     config["quiet"] = bool(config.get("quiet"))
-    for key in ("vision_fallback", "vision_only"):
+    for key in ("vision_fallback", "vision_only", "vision_a11y_boxes"):
         if type(config[key]) is not bool:
             raise ValueError("%s must be true or false" % key)
     if config["vision_mode"] not in ("planned", "fast"):

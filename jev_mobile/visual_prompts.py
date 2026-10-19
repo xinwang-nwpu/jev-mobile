@@ -11,6 +11,8 @@ are reference coordinates, not interface controls. Historical coordinates and
 accessibility indexes are not valid targets on a new screenshot. Only the CURRENT
 elements table supplies usable indexes; they are snapshot-local, not stable IDs.
 Element bounds in that table use the same 0..1000 space as coordinate actions.
+When colored numbered boxes are present, their badges match the CURRENT elements
+table indexes. Boxes and badges are annotations, not app content or extra controls.
 """
 
 PLANNER = COMMON + """
