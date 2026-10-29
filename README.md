@@ -168,6 +168,14 @@ final: com.android.settings / Settings · "设置"
 
 每次保存观察时，另外生成 `*.a11y.json`，保留采集到的整棵 A11Y 树和父子结构，并扫描所有节点，包括不可点击和隐藏节点。重复条件为 `resourceId`、`className`、`text`、`contentDescription` 四项完全相同；不使用坐标和状态区分，不去空格或模糊匹配，缺失字段按 `null` 比较且与空字符串不同。每个节点增加 `is_duplicate` 和 `match_count`（匹配总数，包含自身），重复节点保留。文件还包含总节点数、重复组数、参与重复的节点数和分组清单。关闭截图仍保存这些文件，动作前后通过 `page_before.a11y_file` 和 `page_after.a11y_file` 关联；扫描不增加设备查询或模型请求，也不修改模型候选、编号和页面指纹。实现位于 `jev_mobile/selectors.py`。
 
+单独读取当前页面并导出重复标注和带框截图，无需模型密钥：
+
+```powershell
+python script/capture_a11y.py --device 192.168.1.58:38581
+```
+
+脚本读取 `config.yaml` 的 ADB 路径和设备配置，命令行参数优先。默认输出到 `runs/a11y_capture/<时间>/`，也可用 `--output-dir` 指定目录。`a11y.json` 保存整棵标注后的树；`screen-boxed.png` 在现有坐标网格上为可见且有有效边界的节点画框，重复节点为红框，唯一节点为绿框。隐藏节点仍参与 JSON 中的重复统计。
+
 不想建配置文件时一行直接跑（其余参数见[下文](#命令行参数)）：
 
 ```bash
