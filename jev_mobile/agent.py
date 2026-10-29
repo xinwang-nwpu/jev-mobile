@@ -310,7 +310,7 @@ class Agent:
         self._page_number += 1
         stem = "%06d-%03d" % (self.state["elapsed_ms"], self._page_number)
         if "a11y_tree" in page:
-            report = annotate_duplicates(page["a11y_tree"])
+            report = annotate_duplicates(page["a11y_tree"], page["screen"])
             report.update({k: page.get(k) for k in ("app", "activity", "source", "screen", "a11y_source", "a11y_error")})
             name = stem + ".a11y.json"
             (self.record_dir / name).write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")

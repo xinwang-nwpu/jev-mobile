@@ -27,6 +27,8 @@ def draw_boxes(screenshot, tree, screen):
     draw = ImageDraw.Draw(image)
     boxes = []
     for node in _walk(tree):
+        if node.get("is_duplicate") is None:
+            continue
         bounds = parse_bounds(node.get("bounds"))
         if not bounds or node.get("isVisibleToUser") is False:
             continue
@@ -53,7 +55,7 @@ def capture(adb_path, serial, output_dir):
     if not page.get("a11y_fingerprint"):
         raise RuntimeError("Cannot read A11Y tree. Turn on and unlock the phone and check Jev Bridge accessibility: "
                            + (page.get("a11y_error") or "no tree returned"))
-    report = annotate_duplicates(page["a11y_tree"])
+    report = annotate_duplicates(page["a11y_tree"], page["screen"])
     boxed, box_count = draw_boxes(page["screenshot"], report["tree"], page["screen"])
     output_dir = Path(output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -65,7 +67,7 @@ def capture(adb_path, serial, output_dir):
     screenshot_path.write_bytes(boxed)
     return {
         "app": page["app"], "source": report["source"],
-        **{key: report[key] for key in ("node_count", "duplicate_group_count", "duplicate_node_count")},
+        **{key: report[key] for key in ("node_count", "eligible_node_count", "duplicate_group_count", "duplicate_node_count")},
         "boxed_node_count": box_count,
         "colors": {"duplicate": "red", "unique": "green"},
         "a11y_file": str(tree_path), "screenshot_file": str(screenshot_path),

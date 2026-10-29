@@ -166,7 +166,7 @@ final: com.android.settings / Settings · "设置"
 
 `trace.json` 的 `history[].target_node` 保存本次操作目标在动作前观察中的 11 项属性：完整 `resource_id`、完整 `class_name`、原始 `text`、原始 `content_description`、原生像素 `bounds`，以及 `clickable`、`editable`、`enabled`、`checked`、`selected`、`focused`。文字和描述不按模型标签长度截断；未上报的属性记为 `null`。该记录适用于 Jev 和视觉编号操作，只写本地轨迹，不增加模型输入或设备查询。纯坐标操作未关联 A11Y 节点，以及系统按键等无目标节点的操作，`target_node` 为 `null`。
 
-每次保存观察时，另外生成 `*.a11y.json`，保留采集到的整棵 A11Y 树和父子结构，并扫描所有节点，包括不可点击和隐藏节点。重复条件为 `resourceId`、`className`、`text`、`contentDescription` 四项完全相同；不使用坐标和状态区分，不去空格或模糊匹配，缺失字段按 `null` 比较且与空字符串不同。每个节点增加 `is_duplicate` 和 `match_count`（匹配总数，包含自身），重复节点保留。文件还包含总节点数、重复组数、参与重复的节点数和分组清单。关闭截图仍保存这些文件，动作前后通过 `page_before.a11y_file` 和 `page_after.a11y_file` 关联；扫描不增加设备查询或模型请求，也不修改模型候选、编号和页面指纹。实现位于 `jev_mobile/selectors.py`。
+每次保存观察时，另外生成 `*.a11y.json`，保留采集到的整棵 A11Y 树和父子结构。仅对可见、启用、边界有效且与屏幕相交的节点检查重复；没有可见性字段时按边界判断，缺少启用字段时视为启用。重复条件为 `resourceId`、`className`、`text`、`contentDescription` 四项完全相同，不去空格或模糊匹配。参与检测的节点包含 `is_duplicate` 和 `match_count`（匹配总数，包含自身）；未参与检测的节点这两项为 `null`。文件包含总节点数、参与检测数、重复组数、重复节点数和分组清单。关闭截图仍保存树；扫描不增加设备查询或模型请求。实现位于 `jev_mobile/selectors.py`。
 
 单独读取当前页面并导出重复标注和带框截图，无需模型密钥：
 
@@ -174,7 +174,7 @@ final: com.android.settings / Settings · "设置"
 python script/capture_a11y.py --device 192.168.1.58:38581
 ```
 
-脚本读取 `config.yaml` 的 ADB 路径和设备配置，命令行参数优先。默认输出到 `runs/a11y_capture/<时间>/`，也可用 `--output-dir` 指定目录。`a11y.json` 保存整棵标注后的树；`screen-boxed.png` 在现有坐标网格上为可见且有有效边界的节点画框，重复节点为红框，唯一节点为绿框。隐藏节点仍参与 JSON 中的重复统计。
+脚本读取 `config.yaml` 的 ADB 路径和设备配置，命令行参数优先。默认输出到 `runs/a11y_capture/<时间>/`，也可用 `--output-dir` 指定目录。`a11y.json` 保存整棵标注后的树；`screen-boxed.png` 在现有坐标网格上为参与重复检测的节点画框，重复节点为红框，唯一节点为绿框。
 
 不想建配置文件时一行直接跑（其余参数见[下文](#命令行参数)）：
 
