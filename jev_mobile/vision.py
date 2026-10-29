@@ -49,7 +49,7 @@ def initial_progress():
 def page_summary(page):
     if not page:
         return None
-    return {**{k: page.get(k) for k in ("app", "activity", "source", "screen", "model_screen", "fingerprint", "image_file",
+    return {**{k: page.get(k) for k in ("app", "activity", "source", "screen", "model_screen", "fingerprint", "image_file", "a11y_file",
                                      "a11y_source", "a11y_fingerprint", "a11y_error")},
             "text": (page.get("text") or "")[:1500]}
 

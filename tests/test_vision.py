@@ -736,6 +736,8 @@ def test_visual_boxes_use_current_table_for_initial_and_later_recordings(monkeyp
         assert (page["screenshot"] != raw["screenshot"]) is (enabled and has_tree)
         assert (tmp_path / page["image_file"]).read_bytes() == base64.b64decode(page["screenshot"])
         assert page["visual_signature"] == raw["visual_signature"]
+        saved_tree = json.loads((tmp_path / page["a11y_file"]).read_text(encoding="utf-8"))
+        assert saved_tree["node_count"] == 2 and saved_tree["duplicate_group_count"] == 0
     assert device.visual_reads == 2  # No extra device read for annotations.
 
 

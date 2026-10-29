@@ -5,6 +5,7 @@ are validated before reaching the executor; model output never becomes shell cod
 """
 
 import base64
+import json
 import time
 from copy import deepcopy
 from pathlib import Path
@@ -13,6 +14,7 @@ from xml.etree.ElementTree import ParseError
 
 from .device import Device, StalePage
 from .model import action_space, choose, field_context, field_text
+from .selectors import annotate_duplicates
 from .questions import MAX_STEPS
 from . import vision, visual_images
 
@@ -93,7 +95,7 @@ class Agent:
         self.device = device or Device(adb_path, serial, prepare_portal=not vision_only)
         self.record_dir = Path(record_dir) if record_dir else None
         self.record = bool(self.record_dir)
-        self._image_number = 0
+        self._page_number = 0
         # None = recording implies screenshots; an explicit value always wins.
         self.screenshots = bool(self.record_dir) if screenshots is None else bool(screenshots)
         self.vision_fallback = vision_fallback and vision.configured()
@@ -143,7 +145,7 @@ class Agent:
         self._collect_device_timings()
         return {
             **{k: v for k, v in self.state.items() if k != "page"},
-            "page": {k: v for k, v in self.state["page"].items() if k not in {"screenshot", "visual_signature"}},
+            "page": {k: v for k, v in self.state["page"].items() if k not in {"screenshot", "visual_signature", "a11y_tree"}},
             "elements": action_space(self.state["page"]["actions"])[0],
         }
 
@@ -165,7 +167,7 @@ class Agent:
             "usage": usage_totals(state),
             "history": state["history"],
             "text_calls": state["text_calls"],
-            "final_page": {k: state["page"].get(k) for k in ("app", "activity", "source", "screen")},
+            "final_page": {k: state["page"].get(k) for k in ("app", "activity", "source", "screen", "a11y_file")},
             "events": state["events"],
             "decisions": [
                 {
@@ -303,9 +305,18 @@ class Agent:
 
     def _record_page(self, page=None) -> None:
         page = self.state["page"] if page is None else page
-        if self.record and "screenshot" in page:
-            self._image_number += 1
-            name = "%06d-%03d.png" % (self.state["elapsed_ms"], self._image_number)
+        if not self.record:
+            return
+        self._page_number += 1
+        stem = "%06d-%03d" % (self.state["elapsed_ms"], self._page_number)
+        if "a11y_tree" in page:
+            report = annotate_duplicates(page["a11y_tree"])
+            report.update({k: page.get(k) for k in ("app", "activity", "source", "screen", "a11y_source", "a11y_error")})
+            name = stem + ".a11y.json"
+            (self.record_dir / name).write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+            page["a11y_file"] = name
+        if "screenshot" in page:
+            name = stem + ".png"
             (self.record_dir / name).write_bytes(base64.b64decode(page["screenshot"]))
             page["image_file"] = name
 

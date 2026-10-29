@@ -166,6 +166,8 @@ final: com.android.settings / Settings · "设置"
 
 `trace.json` 的 `history[].target_node` 保存本次操作目标在动作前观察中的 11 项属性：完整 `resource_id`、完整 `class_name`、原始 `text`、原始 `content_description`、原生像素 `bounds`，以及 `clickable`、`editable`、`enabled`、`checked`、`selected`、`focused`。文字和描述不按模型标签长度截断；未上报的属性记为 `null`。该记录适用于 Jev 和视觉编号操作，只写本地轨迹，不增加模型输入或设备查询。纯坐标操作未关联 A11Y 节点，以及系统按键等无目标节点的操作，`target_node` 为 `null`。
 
+每次保存观察时，另外生成 `*.a11y.json`，保留采集到的整棵 A11Y 树和父子结构，并扫描所有节点，包括不可点击和隐藏节点。重复条件为 `resourceId`、`className`、`text`、`contentDescription` 四项完全相同；不使用坐标和状态区分，不去空格或模糊匹配，缺失字段按 `null` 比较且与空字符串不同。每个节点增加 `is_duplicate` 和 `match_count`（匹配总数，包含自身），重复节点保留。文件还包含总节点数、重复组数、参与重复的节点数和分组清单。关闭截图仍保存这些文件，动作前后通过 `page_before.a11y_file` 和 `page_after.a11y_file` 关联；扫描不增加设备查询或模型请求，也不修改模型候选、编号和页面指纹。实现位于 `jev_mobile/selectors.py`。
+
 不想建配置文件时一行直接跑（其余参数见[下文](#命令行参数)）：
 
 ```bash

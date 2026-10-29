@@ -122,6 +122,7 @@ class TestChoose:
         criteria = body["questions"]["click_target"]["criteria"]["2"]
         assert criteria["element"].startswith("[2] Go")
         assert "target_node" not in json.dumps(body)
+        assert "a11y_tree" not in json.dumps(body)
 
     def test_control_choice_maps_to_control_id(self, monkeypatch):
         state = make_state()

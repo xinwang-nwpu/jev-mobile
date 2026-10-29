@@ -97,6 +97,7 @@ def snapshot_state(
         "text": "\n".join(texts)[:MAX_TEXT_CHARS],
         "actions": actions,
         "screen": list(screen),
+        "a11y_tree": elements,
     }
     state["fingerprint"] = fingerprint(state)
     return state

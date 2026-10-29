@@ -86,6 +86,26 @@ def test_cli_writes_operated_node_attributes_to_trace(monkeypatch, tmp_path):
     assert "index" not in attributes and "node" not in attributes and len(attributes) == 11
 
 
+def test_every_recorded_observation_saves_the_tree_with_duplicate_annotations(monkeypatch, tmp_path):
+    first = node(rid="com.example:id/item", text="same", clickable=True)
+    second = {**first, "bounds": "[0,300][400,400]"}
+    device = FakeDevice([[node(cls="Root", children=[first, second])],
+                         [node(cls="Root", children=[first, {**second, "text": "different"}])]])
+    install_script(monkeypatch, [("CLICK", "1")])
+    agent = Agent("goal", device=device, record_dir=str(tmp_path), screenshots=False, vision_fallback=False)
+    agent.tick()
+    history = agent.trace()["history"][0]
+    before = json.loads((tmp_path / history["page_before"]["a11y_file"]).read_text(encoding="utf-8"))
+    after = json.loads((tmp_path / history["page_after"]["a11y_file"]).read_text(encoding="utf-8"))
+    assert before["node_count"] == after["node_count"] == 3
+    assert before["duplicate_node_count"] == 2 and after["duplicate_node_count"] == 0
+    assert before["tree"][0]["children"][0]["resourceId"] == "com.example:id/item"
+    assert agent.trace()["final_page"]["a11y_file"] == history["page_after"]["a11y_file"]
+    assert "a11y_tree" not in agent.snapshot()["page"]
+    assert len(list(tmp_path.glob("*.a11y.json"))) == 2 and not list(tmp_path.glob("*.png"))
+    assert "is_duplicate" not in first
+
+
 class TestBasicLoop:
     def test_click_then_done(self, monkeypatch):
         device = FakeDevice([simple_tree()])
