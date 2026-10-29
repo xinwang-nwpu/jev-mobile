@@ -164,6 +164,8 @@ final: com.android.settings / Settings · "设置"
 
 每步记录默认写入 `runs/<任务名>/`：`trace.json`（逐步观察、决策概率、执行动作、token 汇总）和逐步截图（`--record-dir` 会自动开启截图）。退出码 0 表示 status=done。
 
+`trace.json` 的 `history[].target_node` 保存本次操作目标在动作前观察中的 11 项属性：完整 `resource_id`、完整 `class_name`、原始 `text`、原始 `content_description`、原生像素 `bounds`，以及 `clickable`、`editable`、`enabled`、`checked`、`selected`、`focused`。文字和描述不按模型标签长度截断；未上报的属性记为 `null`。该记录适用于 Jev 和视觉编号操作，只写本地轨迹，不增加模型输入或设备查询。纯坐标操作未关联 A11Y 节点，以及系统按键等无目标节点的操作，`target_node` 为 `null`。
+
 不想建配置文件时一行直接跑（其余参数见[下文](#命令行参数)）：
 
 ```bash

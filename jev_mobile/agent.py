@@ -6,6 +6,7 @@ are validated before reaching the executor; model output never becomes shell cod
 
 import base64
 import time
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from xml.etree.ElementTree import ParseError
@@ -441,6 +442,8 @@ class Agent:
             if "index" in action and not self.device.fresh_index(page):
                 state["events"].append({"type": "reobserve", "reason": "a11y_index_stale", "elapsed_ms": self._elapsed()})
                 raise StalePage("A11Y target changed since the indexed decision; choose from a new snapshot")
+        # Preserve observed attributes before input can change the field or screen.
+        target_node = deepcopy(action.get("target_node"))
         execution_error = None
         try:
             self.device.act(action, text=text)
@@ -458,7 +461,8 @@ class Agent:
                 "kind": action["kind"],
                 "choice": selected,
                 "mode": state["mode"],
-                "device_action": dict(action),
+                "device_action": {k: v for k, v in action.items() if k != "target_node"},
+                "target_node": target_node,
                 "success": execution_error is None,
                 "error": execution_error,
                 "expected_effect": decision.get("expected_effect"),

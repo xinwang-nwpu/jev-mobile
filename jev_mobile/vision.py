@@ -221,6 +221,7 @@ def parse_action(output, screen, installed_apps=(), *, page=None):
             raise ValueError("Index is supported for CLICK, LONG_PRESS and TYPE_TEXT, and cannot accompany point")
         target = indexed_target(page, output["index"], operation)
         action.update({k: target[k] for k in ("center", "bounds", "label", "role")})
+        action["target_node"] = target.get("target_node")
         action.update(index=output["index"], a11y_fingerprint=page["a11y_fingerprint"])
 
     def point(value):

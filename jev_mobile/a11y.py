@@ -73,6 +73,15 @@ def snapshot_state(
             "role": role,
             "center": center,
             "bounds": ",".join(str(v) for v in bounds),
+            "target_node": {
+                "resource_id": el.get("resourceId"),
+                "class_name": el.get("className"),
+                "text": el.get("text"),
+                "content_description": el.get("contentDescription"),
+                "bounds": list(bounds),
+                **{key: _truthy(el[key]) if el.get(key) is not None else None
+                   for key in ("clickable", "editable", "enabled", "checked", "selected", "focused")},
+            },
         }
         if _flag(el, "checked") or _flag(el, "selected"):
             base["checked"] = True
@@ -137,13 +146,10 @@ def parse_uiautomator_xml(xml_text: str) -> List[Dict[str, Any]]:
             "text": node.attrib.get("text", ""),
             "contentDescription": node.attrib.get("content-desc", ""),
             "bounds": node.attrib.get("bounds", ""),
-            "clickable": _truthy(node.attrib.get("clickable")),
-            "enabled": _truthy(node.attrib.get("enabled")),
-            "scrollable": _truthy(node.attrib.get("scrollable")),
-            "checked": _truthy(node.attrib.get("checked")),
-            "selected": _truthy(node.attrib.get("selected")),
             "children": [],
         }
+        for key in ("clickable", "enabled", "editable", "scrollable", "checked", "selected", "focused"):
+            item[key] = _truthy(node.attrib[key]) if key in node.attrib else None
         item["children"] = [convert(child) for child in list(node) if child.tag == "node"]
         return item
 
@@ -160,6 +166,7 @@ FULL_FLAG_MAP = {
     "isChecked": "checked",
     "isSelected": "selected",
     "isFocusable": "focusable",
+    "isFocused": "focused",
     "isLongClickable": "longClickable",
 }
 

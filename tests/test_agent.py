@@ -1,5 +1,7 @@
 """Agent-loop tests with a fake device and scripted decisions."""
 
+import json
+
 import pytest
 
 import jev_mobile.agent as agent_module
@@ -31,6 +33,57 @@ def install_field_text(monkeypatch, value="hello"):
 
 def simple_tree():
     return [node(text="Continue", clickable=True)]
+
+
+@pytest.mark.parametrize("operation", ["CLICK", "TYPE_TEXT"])
+@pytest.mark.parametrize("failed", [False, True])
+def test_history_saves_target_attributes_before_device_input(monkeypatch, operation, failed):
+    raw = node(cls="android.widget.EditText", rid="com.example:id/entry", text="original value",
+               desc="original description", clickable=True, editable=True)
+    raw["focused"] = True
+    device = FakeDevice([[raw], [node(text="result", clickable=True)]])
+    install_script(monkeypatch, [(operation, "1")])
+    install_field_text(monkeypatch, "replacement")
+    def act(action, text=None):
+        action["target_node"]["text"] = "changed during input"
+        action["target_node"]["bounds"][0] = 999
+        if failed:
+            raise RuntimeError("input failed")
+    monkeypatch.setattr(device, "act", act)
+    agent = Agent("goal", device=device, vision_fallback=False)
+    if failed:
+        with pytest.raises(RuntimeError, match="input failed"):
+            agent.tick()
+    else:
+        agent.tick()
+    recorded = json.loads(json.dumps(agent.trace()))["history"][0]
+    assert recorded["target_node"] == {
+        "resource_id": "com.example:id/entry", "class_name": "android.widget.EditText",
+        "text": "original value", "content_description": "original description",
+        "bounds": [0, 100, 400, 200], "clickable": True, "editable": True,
+        "enabled": True, "checked": False, "selected": False, "focused": True,
+    }
+    assert recorded["success"] is not failed
+    assert "target_node" not in recorded["device_action"]
+
+
+def test_cli_writes_operated_node_attributes_to_trace(monkeypatch, tmp_path):
+    from jev_mobile import __main__ as cli
+    monkeypatch.setattr(cli, "load_env_file", lambda: None)
+    monkeypatch.setenv("TYPESAFE_API_KEY", "test-key")
+    config = tmp_path / "config.yaml"
+    config.write_text("task: inspect\nvision_fallback: false\n", encoding="utf-8")
+    device = FakeDevice([[node(text="原始文字", desc="原始描述", rid="com.example:id/full_name", clickable=True)]])
+    original = cli.Agent
+    monkeypatch.setattr(cli, "Agent", lambda *args, **kwargs: original(*args, device=device, **kwargs))
+    install_script(monkeypatch, [("CLICK", "1"), ("DONE", None)])
+    record_dir = tmp_path / "run"
+    assert cli.main(["--config", str(config), "--record-dir", str(record_dir), "--no-screenshots", "--quiet"]) == 0
+    saved = json.loads((record_dir / "trace.json").read_text(encoding="utf-8"))
+    attributes = saved["history"][0]["target_node"]
+    assert attributes["resource_id"] == "com.example:id/full_name"
+    assert attributes["text"] == "原始文字" and attributes["content_description"] == "原始描述"
+    assert "index" not in attributes and "node" not in attributes and len(attributes) == 11
 
 
 class TestBasicLoop:

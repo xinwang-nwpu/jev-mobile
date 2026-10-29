@@ -103,6 +103,13 @@ def test_coordinate_contract_and_focused_append():
     assert "center" not in fill and fill["value"] == "old" and text == "old new"
 
 
+def test_coordinate_action_without_a11y_target_records_no_invented_node(monkeypatch):
+    enable(monkeypatch, [action(point=[500, 500])])
+    agent = loop.Agent("goal", device=VisualDevice([[]]), vision_only=True, vision_mode="fast")
+    agent.tick()
+    assert agent.trace()["history"][0]["target_node"] is None
+
+
 @pytest.mark.parametrize("trigger,steps,expected", [
     ("blocked", 1, "blocked"), ("model_error", 1, "model_error"),
     ("observation_error", 0, "observation_error"), ("no_targets", 0, "no_targets"),
@@ -1074,17 +1081,25 @@ def test_indexed_input_only_accepts_editable_targets_even_without_click_flag():
     ("CLICK", {}), ("LONG_PRESS", {"duration_ms": 950}),
     ("TYPE_TEXT", {"text": "new", "clear": True}),
 ])
-def test_visual_roles_execute_indexed_actions_and_record_grounding(monkeypatch, operation, args):
-    requests = enable(monkeypatch, [plan(), action(operation, index=1, **args)])
-    device = IndexedVisualDevice([[node(cls="android.widget.EditText", text="old", clickable=True)]])
-    agent = loop.Agent("goal", device=device, vision_only=True)
+@pytest.mark.parametrize("vision_mode", ["planned", "fast"])
+def test_visual_roles_execute_indexed_actions_and_record_grounding(monkeypatch, operation, args, vision_mode):
+    requests = enable(monkeypatch, ([] if vision_mode == "fast" else [plan()]) + [action(operation, index=1, **args)])
+    device = IndexedVisualDevice([[node(cls="android.widget.EditText", rid="com.example:id/editor",
+                                       text="old", desc="editor description", clickable=True)]])
+    agent = loop.Agent("goal", device=device, vision_only=True, vision_mode=vision_mode)
     agent.tick()
     assert len(device.acts) == 1 and device.acts[0][0]["center"] == [200, 150]
-    context = json.loads(requests[1]["messages"][1]["content"][0]["text"])
+    context = json.loads(requests[-1]["messages"][1]["content"][0]["text"])
     assert context["elements"][0]["index"] == 1
     assert agent.state["history"][0]["target"] == 1
     assert "[1]" in format_step(agent.state["history"][0], False)
     assert agent.trace()["model_calls"][-1]["observed"]["elements"] == context["elements"]
+    recorded = agent.trace()["history"][0]["target_node"]
+    assert recorded["resource_id"] == "com.example:id/editor"
+    assert recorded["class_name"] == "android.widget.EditText"
+    assert recorded["text"] == "old" and recorded["content_description"] == "editor description"
+    assert recorded["bounds"] == [0, 100, 400, 200] and len(recorded) == 11
+    assert "target_node" not in json.dumps(context)
 
 
 def test_indexed_text_focuses_and_types_in_one_recorded_device_action(monkeypatch):

@@ -1,5 +1,7 @@
 """A11Y snapshot tests: tree parsing, action derivation, fingerprints."""
 
+import copy
+
 from jev_mobile.a11y import (
     fingerprint,
     normalize_tree,
@@ -31,6 +33,8 @@ def test_parse_uiautomator_xml_normalizes_attributes():
     assert child["contentDescription"] == ""
     assert child["clickable"] is True
     assert child["className"] == "android.widget.EditText"
+    assert tree[0]["focused"] is False
+    assert child["focused"] is None
 
 
 def test_normalize_tree_maps_kebab_keys():
@@ -51,6 +55,7 @@ def test_normalize_tree_maps_full_format_portal_nodes():
         "isScrollable": False,
         "isChecked": False,
         "isSelected": False,
+        "isFocused": True,
         "boundsInScreen": {"left": 10, "top": 20, "right": 110, "bottom": 220},
         "children": [],
     }
@@ -59,6 +64,7 @@ def test_normalize_tree_maps_full_format_portal_nodes():
     assert node["clickable"] is True
     assert node["enabled"] is True
     assert node["editable"] is False
+    assert node["focused"] is True
     assert node["bounds"] == "10,20,110,220"
     assert "isClickable" not in node and "boundsInScreen" not in node
 
@@ -96,6 +102,35 @@ def test_editable_and_clickable_share_one_node():
     fill = next(a for a in state["actions"] if a["id"] == "type-0")
     assert fill["kind"] == "fill"
     assert fill["value"] == "old value"
+
+
+def test_action_keeps_exact_node_attributes_separate_from_short_model_labels():
+    raw = node(cls="com.example.CustomEditText", rid="com.example:id/full_resource_name",
+               text="untrimmed text " * 20, desc="untrimmed description " * 20,
+               bounds="[10,100][410,200]", clickable=True, editable=True, selected=True)
+    raw["focused"] = "false"
+    original = copy.deepcopy(raw)
+    page = make_page([raw])
+    expected = {
+        "resource_id": raw["resourceId"], "class_name": raw["className"],
+        "text": raw["text"], "content_description": raw["contentDescription"],
+        "bounds": [10, 100, 410, 200], "clickable": True, "editable": True,
+        "enabled": True, "checked": False, "selected": True, "focused": False,
+    }
+    actions = [a for a in page["actions"] if a["kind"] in ("click", "fill")]
+    assert len(actions) == 2 and all(a["target_node"] == expected for a in actions)
+    assert len(actions[0]["label"]) < len(expected["content_description"])
+    assert raw == original
+    actions[0]["target_node"]["focused"] = True
+    assert fingerprint(page) == page["fingerprint"]
+
+
+def test_unreported_node_states_stay_unknown_in_recording():
+    raw = {"className": "android.widget.EditText", "bounds": "[0,100][400,200]"}
+    fill = next(a for a in make_page([raw])["actions"] if a["kind"] == "fill")
+    target = fill["target_node"]
+    assert all(target[key] is None for key in ("resource_id", "text", "content_description",
+                                              "clickable", "editable", "enabled", "checked", "selected", "focused"))
 
 
 def test_editable_label_avoids_current_value():

@@ -1,5 +1,7 @@
 """Model-layer tests: choice validation, action space, and the TypeSafe request shape."""
 
+import json
+
 import pytest
 
 from jev_mobile import model
@@ -119,6 +121,7 @@ class TestChoose:
         assert gate["type"] == "noul" and "goal" in gate["instructions"]
         criteria = body["questions"]["click_target"]["criteria"]["2"]
         assert criteria["element"].startswith("[2] Go")
+        assert "target_node" not in json.dumps(body)
 
     def test_control_choice_maps_to_control_id(self, monkeypatch):
         state = make_state()
