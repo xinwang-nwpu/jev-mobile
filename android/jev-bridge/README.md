@@ -1,6 +1,6 @@
 # Jev Bridge
 
-`ai.jev.bridge` 是 jev-mobile 的独立 Android 辅助 App，Android 8.0+。源码和 APK 均为 AGPL-3.0-or-later 的派生作品；来源、基线和裁剪明细见 [NOTICE.md](NOTICE.md)。
+`ai.jev.bridge` 是 jev-mobile 的独立 Android 辅助 App，Android 8.0+。源码和 APK 均为 AGPL-3.0-or-later 的派生作品；来源、基线和裁剪明细见。
 
 保留屏幕控件读取、手机状态及中文输入。HTTP 服务仅监听手机本机，经 ADB 转发访问；没有云登录、文件管理、短信或联系人读取权限。截图、点击、长按、滑动仍由 Python 客户端通过 ADB 完成。它不是一个新的决策模型。
 

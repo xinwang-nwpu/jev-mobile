@@ -1,267 +1,195 @@
-# jev-mobile ⚡
+<h1 align="center">Jev Mobile</h1>
 
-**An Android phone agent: TypeSafe Jev makes fast A11Y decisions; a visual agent takes over after problems. Both execute over ADB.**
+<p align="center">
+  Give your Android phone a task in plain language.<br>
+  Models inspect the current screen, choose actions, and hand over to a visual agent when needed.
+</p>
 
-[中文文档](README.md)
+<p align="center">
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#choose-a-model">Choose a model</a> ·
+  <a href="#how-it-works">How it works</a> ·
+  <a href="#run-records">Run records</a> ·
+  <a href="android/jev-bridge/README.md">Jev Bridge</a> ·
+  <a href="docs/visual-agent.md">Visual agent</a> ·
+  <a href="README.md">中文</a>
+</p>
 
-Give it a natural-language goal such as "Open Settings and turn on Airplane Mode." [TypeSafe Jev](https://docs.typesafe.ai/) picks an operation and a target from the indexed element table. A small LLM supplies fast-path text. Configuring a visual model enables screenshot-based recovery with the original goal and executed history.
+<p align="center">
+  <img src="https://img.shields.io/badge/Android-8.0%2B-3DDC84?logo=android&logoColor=white" alt="Android 8.0 and later">
+  <img src="https://img.shields.io/badge/Python-3.9%2B-3776AB?logo=python&logoColor=white" alt="Python 3.9 and later">
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/xinwang-nwpu/jev-mobile" alt="License"></a>
+</p>
 
-## Demo
+---
 
-For the task "在哔哩哔哩，播放龙卷风视频" (open Bilibili and play the *龙卷风* video): 18 seconds end to end, only 2–3s per action decision, no multimodal model involved at all, and a tiny token footprint.
-
-<a href="docx/demo.mp4"><img src="docx/demo.gif" alt="Live demo: one natural-language goal; Jev decides and executes with one request per step" width="320" /></a>
-
-[Watch the MP4](docx/demo.mp4)
-
-## The action space
-
-Every observation (one A11Y-tree snapshot) produces a fresh indexed element table:
-
-```text
-[1] EditText  query        · value=""
-[2] TextView  Go
-...
-
-Operations: CLICK, TYPE_TEXT, SCROLL_UP, SCROLL_DOWN, BACK, HOME, ENTER, WAIT, DONE, BLOCKED
+```powershell
+python -m jev_mobile --task "Open Bilibili and search for Jay Chou's Tornado"
 ```
 
-```text
-                      one TypeSafe request
-                     ┌───────────────────────────┐
-A11Y tree → table ──→│ operation (what to do)     │
-                     │ click_target (tap what)    │
-                     │ type_text_target (where)   │
-                     └─────────────┬─────────────┘
-                       consume only the target head
-                       matching the chosen operation
-                                   │
-                    CLICK [2] ────┤──→ adb input tap
-                TYPE_TEXT [1] ────┘
-                          ↓
-                 small LLM → text → adb keyboard
+Jev Mobile reads the screen and accessibility nodes, chooses actions such as tapping, typing, and scrolling, and interacts with the phone through ADB. Use cloud-hosted Jev, a local multimodal OneJev service, or a visual model from the first step.
+
+<p align="center">
+  <img src="docx/demo.gif" width="320" alt="Jev Mobile operating an Android phone">
+  <br><a href="docx/demo.mp4">Watch the full demonstration</a>
+</p>
+
+> The demonstration shows one run. Actual speed and results depend on the device, page, network, and models.
+
+## What it can do
+
+- **Operate from a task**: select actionable nodes on the current screen, tap, type, scroll, go back, or wait, then observe again.
+- **Choose a model**: use TypeSafe Jev, local OneJev with screenshots and A11Y candidates, or the visual agent alone.
+- **Recover and review**: hand over to the visual agent when the fast path fails or gets stuck; review OneJev's completion proposals with a visual model.
+- **Inspect each run**: Jev Bridge supplies accessibility trees and Unicode input; run records capture screenshots, nodes, actions, timings, and model calls.
+
+## Quick start
+
+The following example uses Windows PowerShell and a connected Android phone. See [config.example.yaml](config.example.yaml) and [.env.example](.env.example) for all settings.
+
+### 1. Prepare the phone and environment
+
+- Python 3.9 or later and [Android platform-tools](https://developer.android.com/tools/releases/platform-tools), with `adb` available.
+- An Android phone with developer options and USB or wireless debugging enabled. Accept the device's debugging authorization prompt.
+- We recommend installing [Jev Bridge](android/jev-bridge/README.md) and enabling its accessibility service and keyboard for page reading and Unicode input. Other supported channels can be used as fallbacks.
+
+```powershell
+adb devices
 ```
 
-Target questions are speculative: if the operation is `CLICK`, only `click_target` can execute. Two decisions, **one network round trip**; each target head contains only compatible elements. The fast path uses observed indexes; the visual path validates coordinate types and ranges. Both execute predefined actions rather than model-generated shell commands.
+Confirm that the device is listed as `device`. For wireless debugging, pair and connect it first using the phone's instructions.
 
-**Termination is a separate question.** A fast-path noul verdict ≥ 0.5 ends the task. A false verdict vetoes DONE and runs WAIT; after two vetoes, a third DONE goes to visual recovery. Without recovery, legacy third-DONE acceptance remains. Visual completion requires a planner or executor proposal followed by a separate verifier request on a freshly captured image, covering every original checklist item; rejection returns to planning.
+### 2. Install the project
 
-## Fast decisions and visual recovery
+```powershell
+git clone https://github.com/xinwang-nwpu/jev-mobile.git
+cd jev-mobile
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -e .
+Copy-Item .env.example .env
+Copy-Item config.example.yaml config.yaml
+```
 
-The visual module independently implements the planning, execution, feedback, memory, image and inference mechanisms studied in local Mobilerun. Source, prompts and protocols were authored independently. It needs neither Mobilerun nor LlamaIndex; Pillow handles images. See the [implementation comparison](docs/visual-agent.md) (Chinese).
+### 3. Configure models
 
-Set an image-capable model supporting OpenAI-compatible Chat Completions and JSON output in `.env`:
+Edit `.env`. For example, to use TypeSafe Jev as the fast model:
 
 ```dotenv
-VISION_MODEL_API_KEY=your-key
-VISION_MODEL_BASE_URL=https://openrouter.ai/api/v1
-VISION_MODEL=your-vision-model
+FAST_MODEL_BACKEND=jev
+FAST_MODEL_URL=https://api.typesafe.ai/v1/systemone
+FAST_MODEL_NAME=jev-latest
+FAST_MODEL_API_KEY=your-key
 ```
 
-Recovery is enabled when both key and model are configured. It triggers on failed A11Y observation, missing click/input targets, model or execution errors, three unchanged actions, four clicks toggling the same control between two states, or persistent completion disagreement.
+Text entry also needs `TEXT_MODEL_API_KEY`, `TEXT_MODEL_BASE_URL`, and `TEXT_MODEL`. Visual recovery and completion review need `VISION_MODEL_API_KEY`, `VISION_MODEL_BASE_URL`, and an image-capable `VISION_MODEL`. These services must provide the OpenAI-compatible Chat Completions interface used by the project.
 
-Requests receive role-specific context while preserving the original goal and constraints. Planner/verifier receive compact full-history summaries and three recent outcomes; executor receives the active plan, current elements, two recent outcomes and earlier entered values. Full audit details remain in the trace. Planner memory is a replacement snapshot of up to 20 facts with stable keys, avoiding accumulation of paraphrases. Supported device actions include point/area click, adjustable long press/swipe/wait, focused/replacement/append input, installed-app launch, back, home and enter. The executor cannot finish a task. Integer coordinates use 0–1000 and map to native PNG dimensions; resizing preserves the full image.
+For local OneJev or visual-only operation, see [Choose a model](#choose-a-model). Keep credentials in your local `.env` and out of version control.
 
-The planner creates a plan once; the executor uses fresh observations, its cumulative summary and actual action outcomes to decide what remains. There is no program-maintained stage counter or numbered completion reporting. Deviations, execution failures, stalls, stale actions or rejected completion trigger replanning. Executor replies use `status: act|replan|complete`, summary and reason; only act includes a device action and expected_effect. Completion proposals always require independent review.
+### 4. Connect and run
 
-Visual mode takes over for the remaining task. Both modes share 60 device-action attempts and 240 logical decision-model attempts, including all roles, failed responses and schema corrections. Each role gets at most three response attempts; execution errors, stalls and rejected completion feed back into planning, stopping after three recovery feedbacks without detected change. `--no-screenshots` affects fast-path images only. Disable recovery with `--no-vision-fallback`. Traces preserve role responses, usage, subgoals, before/after pages and errors.
+Set `adb_path` in `config.yaml`. Leave `device` empty for one device, or use the serial shown by `adb devices` when several devices are connected. Then run:
 
-Indexed guards read the current default-display window/geometry and A11Y without screenshots; unsupported OEM output falls back to full visual validation. Traces record device stages and per-round model/device/other timing, including failures, with overlapping device intervals counted once. CLI labels role-request latency separately from round duration. TYPE_TEXT focuses and enters text in one device action; prompts avoid a separate focus-only CLICK while keeping submission separate.
-
-Run the visual workflow from the first observation with `python -m jev_mobile --vision-only --task "Your task"`, or set `vision_only: true`. This needs only the visual key/model. Prompts live in `jev_mobile/visual_prompts.py`; optional `VISION_PLANNER_MODEL`, `VISION_EXECUTOR_MODEL` and `VISION_VERIFIER_MODEL` override the shared model using the same endpoint/key.
-
-Set `vision_mode: fast` in `config.yaml` to skip Planner and let Executor choose each next action directly, including recovery. `vision_mode: planned` preserves the original workflow and is the default. Both visual-only runs and Jev handoffs use this setting. Visual fast skips all pre-execution page/window/dimension/target freshness checks and executes coordinates resolved from the supplied observation. It also skips the extra focus checks before prediction and after completion review. Normal post-action observations and independent completion verification against the entire original task remain enabled; typing and submitting remain separate actions.
-
-Visual requests also carry current indexed A11Y elements, using the same numbering as Jev. CLICK, LONG_PRESS and TYPE_TEXT support integer index targets; CLICK/LONG_PRESS also accept coordinates, and indexed input reads the field's current value from the snapshot. Indexed actions refresh the tree before dispatch and replan when the table, focus or dimensions changed. A11Y is optional: a failed probe disables further probes on this Device instance while screenshot/coordinate actions continue; a new Device retries. See the [index/coordinate contract](docs/visual-agent.md#a11y-编号与坐标共同执行).
-
-## Why it moves
-
-- **One model request per step.** The operation head, every target head, and the independent goal-achieved judgment (noul) share the same observed state and are evaluated in parallel within a single request.
-- **No screenshots in the default loop.** Jev consumes structured state: className, text, contentDescription, resourceId, bounds, checked/selected, and related semantic properties.
-- **One A11Y read covers the whole state, and three reads run in parallel.** Prefer [Jev Bridge](android/jev-bridge/README.md) (`ai.jev.bridge`), with compatibility for Portal (`com.mobilerun.portal` / `com.droidrun.portal`): a single content query returns the tree plus phone state. Fall back to `uiautomator dump /dev/tty` when absent. Tree, focused window, and screenshot are fetched concurrently. Jev Bridge also provides Unicode input through its enabled keyboard; its Android source is a trimmed AGPL-3.0-or-later derivative with provenance in NOTICE.md.
-- **Cheap freshness guards.** Jev and planned visual mode compare window focus before predicting. Jev compares semantic fingerprints before stopping; planned visual stops check window focus, since pixel equality rejects animated screens. Visual fast skips these extra checks.
-- **Text is generated only when needed and optimized on the path.** Clearing a field happens in one device-side shell (`MOVE_END` + repeated `DEL`); non-ASCII text goes through an ADB Keyboard broadcast; the IME is switched once on first input and restored on close.
-- **Fast-path semantic fingerprints.** Three unchanged non-WAIT steps or a two-state click cycle trigger recovery, or stop when disabled. Visual stalls use grayscale summaries before adding the grid, followed by replanning. Animations can still look like progress; shared budgets bound repeated actions.
-
-## Quickstart (reproducing this project)
-
-Five steps from zero to a finished run: **install → keys → task → device → run**.
-
-### Prerequisites
-
-- Python ≥ 3.9;
-- a working adb: download [platform-tools](https://developer.android.com/tools/releases/platform-tools) and unzip — no Android Studio needed;
-- an Android phone with Developer options → USB debugging enabled, connected over USB, debugging prompt accepted;
-- a [TypeSafe Jev](https://docs.typesafe.ai/) API key (required); plus a key for any OpenAI-compatible model (DeepSeek, OpenRouter, …) when the task involves typing.
-
-### 1. Install and self-check
-
-```bash
-cd jev-mobile
-pip install -e .          # with uv: uv sync (the repo ships uv.lock)
-pip install pytest
-python -m pytest          # offline; no device or keys needed — all green means the environment is ready
+```powershell
+python -m jev_mobile --task "Open Settings"
 ```
 
-### 2. Keys (.env)
+The program prints decisions, actions, and timings. By default it saves run records under `runs/<task-name>/`. A `done` status means the execution flow judged the task complete; inspect the saved screenshots and trace to review the result.
 
-```bash
-cp .env.example .env      # Windows CMD: copy .env.example .env
+## Choose a model
+
+| Mode | Input and execution | Requirements |
+| --- | --- | --- |
+| **TypeSafe Jev** | Chooses actions and targets from A11Y elements; the fast path includes an independent completion judgment | TypeSafe endpoint and key; text model for text entry |
+| **OneJev** | Uses screenshots and A11Y action candidates to choose an operation and target together | Local SystemOne service; text model for text entry; visual model for completion review |
+| **Visual-only** | Uses screenshots and available A11Y indexes from the first step; the visual agent executes and reviews | Image-capable visual model with JSON output |
+
+### Use local OneJev
+
+Deploy and start a OneJev service that supports the SystemOne interface. Model files and the inference service are not included in this repository. Then configure `.env`:
+
+```dotenv
+FAST_MODEL_BACKEND=onejev
+FAST_MODEL_URL=http://127.0.0.1:8000/v1/systemone
+FAST_MODEL_NAME=OneJev1.6-4B-Q4_K_M
+FAST_MODEL_API_KEY=
 ```
 
-Fill in `TYPESAFE_API_KEY` (required). Add `TEXT_MODEL_API_KEY` when the task types text (defaults to DeepSeek; point `TEXT_MODEL_BASE_URL` at any OpenAI-compatible endpoint). Set `ADB_PATH` to an absolute path when adb is not on PATH. Full table [below](#environment-variables).
+Set `vision_only: false` and `vision_fallback: true` in `config.yaml`, and configure a visual model. OneJev requires screenshots on each decision and cannot be used with `--no-screenshots`. It does not request a separate task-completion probability; a `DONE` proposal is handed to the visual agent for review.
 
-### 3. Task (config.yaml)
+### Start with the visual agent
 
-```bash
-cp config.example.yaml config.yaml    # Windows CMD: copy
+After configuring `VISION_MODEL_*`, run:
+
+```powershell
+python -m jev_mobile --vision-only --task "Open Settings"
 ```
 
-The minimal config changes only `task`; every other key keeps its default (each key is commented in `config.example.yaml`):
+Alternatively, set `vision_only: true` in `config.yaml`. `vision_mode: fast` skips the Planner and uses an Executor with completion review; `planned` uses a Planner, Executor, and Verifier. See the [visual-agent documentation](docs/visual-agent.md) for roles and prompts.
 
-```yaml
-task: "Open Settings and turn on Airplane Mode"
-adb_path: 'C:\platform-tools\adb.exe'   # leave empty when adb is on PATH
-```
-
-`config.yaml` is read from the working directory or the repo root; with neither present, defaults apply and `--task` alone works.
-
-### 4. Connect the phone
-
-```bash
-adb devices               # must list the device as `device`; accept the prompt when it shows `unauthorized`
-```
-
-### 5. Run
-
-```bash
-python -m jev_mobile
-```
-
-Typical output (console labels are Chinese):
+## How it works
 
 ```text
-[   0.8s] 决策  CLICK 0.62 | DONE 0.15 | SCROLL_DOWN 0.11 | +6  conf=0.62  512ms  目标: [12] 0.93 [3] 0.04  goal=0.02
-[   1.3s] CLICK [12] 飞行模式 changed=True → Settings
-...
-status=done steps=2 decisions=8 elapsed=31.7s  决策均值 540ms
-tokens 决策 in≈8600 out≈420 · 合计 in≈8600 out≈420
-final: com.android.settings / Settings · "设置"
+User task
+   ↓
+Observe: screenshot / A11Y tree → select actionable nodes → assign temporary indexes
+   ↓
+Decide: Jev or OneJev selects an operation and target
+   ↓
+Execute: ADB taps and swipes; Jev Bridge or another input channel enters text
+   ↓
+Observe again → next step
+   ↓ when recovery or review is needed
+Visual agent takes over → execute / review completion
 ```
 
-Per-step records default to `runs/<task-name>/`: `trace.json` (per-step observations, decision probabilities, executed actions, and a token-usage summary) plus screenshots (`--record-dir` turns screenshots on automatically). Exit code 0 means status=done.
+The fast path supports tapping, text entry, scrolling, back, home, enter, and waiting. The visual path also supports tapping, long pressing, typing, swiping, and launching apps using coordinates or current A11Y indexes. Indexes are assigned for each observation; the executor runs predefined actions.
 
-One-liner without a config file (all flags [below](#cli-flags)):
+Screenshots can include a coordinate grid and A11Y index boxes, controlled by `vision_a11y_boxes` in `config.yaml`. Screenshots and A11Y trees are read separately and can differ while a page is changing. Check the actual target and result for actions such as sending messages.
 
-```bash
-python -m jev_mobile --task "Open Settings and turn on Airplane Mode" --start-package com.android.settings
-```
+## Run records
 
-### Optional accelerators
+The default directory is `runs/<task-name>/`; use `--record-dir` to choose another location:
 
-- Droidrun / Mobilerun Portal on the device — the main A11Y-read accelerator (measured roughly 1s → the 100ms–1s range, depending on device and Portal version); without it the loop falls back to `uiautomator dump` (several seconds per dump on some devices; keeps the feature working, barely);
-- [ADB Keyboard](https://github.com/senzhk/ADBKeyBoard) on the device — enables non-ASCII input; without it only ASCII can be typed.
-
-### Troubleshooting
-
-| Symptom | Fix |
+| File | Contents |
 | --- | --- |
-| `adb devices` shows `unauthorized` | Accept the debugging prompt on the phone; or revoke USB debugging authorizations and replug |
-| `TYPESAFE_API_KEY is missing` | `.env` not created or key unfilled; make sure it sits in the working directory |
-| ~1s stall before each observation | No Portal installed, so the slow uiautomator fallback is used; install Portal on the device |
-| Portal installed but still ~1s per step | That is the per-step screenshot; pass `--no-screenshots` to keep only `trace.json` |
-| Chinese text won't type | Install ADB Keyboard (see above) |
+| `trace.json` | Actions, targets, results, model calls, handoff reasons, and timings |
+| `*.a11y.json` | Attributes, `actionList`, and duplicate markers for nodes in the current action table |
+| Screenshots | Page images from the visual path and fast paths with screenshots enabled |
 
-## Use
+An action's `target_node` records the target's full resource ID, class name, original text and description, native bounds, and clickable, editable, enabled, checked, selected, and focused states. It is empty when a coordinate action has no associated node.
 
-CLI flags override `config.yaml` (priority: CLI flags > `config.yaml` > environment variables):
+Duplicate detection compares visible, enabled nodes with valid bounds. Nodes are duplicates when `resourceId`, `className`, `text`, and `contentDescription` all match exactly. Capture the current page separately with duplicate annotations and a boxed screenshot:
 
-```bash
-python -m jev_mobile --task "Open Settings and turn on Airplane Mode" --record-dir runs/demo
+```powershell
+python script/capture_a11y.py --device DEVICE_SERIAL
 ```
 
-### CLI flags
+The capture script uses red boxes for duplicates and green for unique nodes. The agent's colored index boxes identify operation targets; they serve a different purpose.
 
-| Flag | Purpose |
-| --- | --- |
-| `--task` | Natural-language goal (required) |
-| `--start-package` | Package to launch before the first observation, e.g. `com.android.settings` |
-| `--adb-path` / `--device` | Override `ADB_PATH` / `ANDROID_DEVICE` |
-| `--record-dir` | Save per-step screenshots and `trace.json`; defaults to `runs/<task-name>/` |
-| `--screenshots` | Observe with screenshots (implied by `--record-dir`) |
-| `--no-screenshots` | Skip fast-path screenshots; visual recovery still captures images |
-| `--no-vision-fallback` | Disable visual recovery; `--no-screenshots` alone still allows visual screenshots |
-| `--vision-only` | Start with visual planning/execution/review; no Jev key required |
-| `--action-interval` | Extra seconds to wait after each executed action, default 0 (env: `ACTION_INTERVAL`) |
+## Common configuration
 
-### Library
-
-```python
-from jev_mobile import Agent
-
-with Agent("Open Settings and turn on Airplane Mode", start_package="com.android.settings") as agent:
-    for state in agent.run():
-        last = state["history"][-1] if state["history"] else None
-        print(state["elapsed_ms"], state["status"], last["action"] if last else "")
+```yaml
+vision_only: false       # true: use the visual model from the first step
+vision_fallback: true    # allow visual recovery when the fast path fails or stalls
+vision_mode: fast        # fast or planned
+vision_a11y_boxes: true  # show actionable-node indexes on screenshots
 ```
 
-### Environment variables
+Other options include `--device`, `--adb-path`, `--record-dir`, `--start-package`, `--no-vision-fallback`, and `--quiet`. See all command-line arguments with:
 
-Loaded automatically from `.env`; CLI flags win:
-
-| Variable | Purpose | Default |
-| --- | --- | --- |
-| `TYPESAFE_API_KEY` | Jev decision-model key (required) | — |
-| `TYPESAFE_MODEL` | Model name | `jev-latest` |
-| `TEXT_MODEL_API_KEY` | Text-model key (required when typing) | — |
-| `TEXT_MODEL_BASE_URL` | Any OpenAI-compatible endpoint | `https://api.deepseek.com/v1` |
-| `TEXT_MODEL` / `TEXT_MODEL_REASONING` | Text model / disable thinking | `deepseek-chat` / — |
-| `VISION_MODEL_API_KEY` / `VISION_MODEL` | Visual key / image-capable model; both enable recovery | — |
-| `VISION_MODEL_BASE_URL` | OpenAI-compatible visual endpoint | `https://openrouter.ai/api/v1` |
-| `VISION_PLANNER_MODEL` / `VISION_EXECUTOR_MODEL` / `VISION_VERIFIER_MODEL` | Optional role models sharing endpoint/key | `VISION_MODEL` |
-| `VISION_MODEL_TIMEOUT` | Visual timeout, 1–300 seconds | `90` |
-| `VISION_IMAGE_MAX_SIDE` | Longest image edge, 320–4096; no cropping | `1600` |
-| `VISION_CHANGE_THRESHOLD` | Mean grayscale difference, 0–255; stall detection only | `3` |
-| `ADB_PATH` / `ANDROID_DEVICE` | adb path / device serial | `adb` / empty |
-| `ACTION_INTERVAL` | Extra seconds to wait after each executed action | `0` |
-
-## Code map
-
-| File | Responsibility |
-| --- | --- |
-| `jev_mobile/agent.py` | The complete loop: predict → act → observe; independent goal-gated termination, DONE freshness check, budgets, stuck detection |
-| `jev_mobile/a11y.py` | One snapshot → indexed action space (click/fill + fixed controls), visible text, semantic fingerprint |
-| `jev_mobile/device.py` | ADB connection, Portal/uiautomator tree reads, tap/swipe/keyboard input, IME management |
-| `jev_mobile/model.py` | TypeSafe dynamic operation/target heads + small-model text generation, answer validation |
-| `jev_mobile/vision.py` | Planning/execution/review, shared context, protocol validation and recovery |
-| `jev_mobile/visual_prompts.py` | Original planner/executor/verifier prompts |
-| `jev_mobile/visual_images.py` | Resizing, grid, native dimensions and change detection |
-| `jev_mobile/config.py` | Loads config.yaml (unknown keys are rejected to catch typos) |
-| `jev_mobile/questions.py` | Decision and text instructions |
-| `scripts/jev_probe.py` | Jev probe: test the Choice / Score / Noul primitives standalone |
-| `scripts/bench_a11y.py` | A11Y capture benchmark: Portal state_full vs uiautomator |
-
-`jev_probe.py` examples:
-
-```bash
-python scripts/jev_probe.py --question "Pick one" --options hiking shopping   # Choice
-python scripts/jev_probe.py --type score --question "How severe?" --options low medium high
-python scripts/jev_probe.py --type noul --question "Is this urgent?" --state "message text"
-python scripts/jev_probe.py --demo                                          # all three in one request
+```powershell
+python -m jev_mobile --help
 ```
 
-## Design boundaries
+If `adb devices` shows `unauthorized`, confirm debugging authorization on the phone. If Unicode input fails, check that the Jev Bridge keyboard is enabled and selected. See [Jev Bridge](android/jev-bridge/README.md) for installation and API details.
 
-- **Freshness depends on target type.** Visual indexed actions refresh A11Y before dispatch, rejecting changed tables, windows or dimensions. Fast-path and visual coordinate actions retain focus guards and post-action change detection; layout changes within a window can still stale their coordinates. Tree refresh adds overhead.
-- **No SELECT operation.** Android dropdowns go through the click flow.
-- **Limits:** 60 device-action attempts, 240 logical decision-model attempts, 250 fast-path elements. Fast-path text helpers are counted separately and bounded by the action limit.
-- **The uiautomator fallback is slow** (~1s per dump, several seconds on some devices); Portal is the main accelerator, but the Portal query's own latency (~100ms–1s depending on the device) sets the floor for each observation.
-- **Completion is still a model judgment.** Visual mode now has separate review on fresh images; two judgments by the same model can share errors. Normal fast-path completion does not invoke visual review; use vision-only mode to review every finish. No automatic return to Jev, cloud/iOS/MCP/skill-service port or measured real-device success-rate parity is claimed.
+## Project layout
 
-## Development
-
-```bash
-python -m pytest      # offline; no device or network needed
+```text
+jev_mobile/           Agent loop, model requests, device communication, and A11Y processing
+android/jev-bridge/   Android companion app
+script/               Page-tree capture and annotation
+tests/                Python tests
+docs/                 Visual implementation, performance analysis, and research notes
 ```
-
-The tests cover action-space construction (one node, one index, multiple operations), answer validation, the typing flow (text helper + execution record), stale-DONE re-deciding, and action budgets and stuck detection.

@@ -7,3 +7,6 @@ runs/
 dist/
 .idea/
 .pytest_cache/
+/jev_mobile.egg-info/
+/docs/
+/1.py
