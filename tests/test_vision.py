@@ -103,6 +103,25 @@ def test_coordinate_contract_and_focused_append():
     assert "center" not in fill and fill["value"] == "old" and text == "old new"
 
 
+def test_visual_requests_use_normalized_coordinates_without_screen_dimensions(monkeypatch):
+    requests = enable(monkeypatch, [plan(), action(point=[500, 500]), execution(), review()])
+    device = VisualDevice([[node(text="Canvas")]])
+    agent = loop.Agent("goal", device=device, vision_only=True)
+    list(agent.run())
+    assert agent.state["status"] == "done"
+    assert device.acts[0][0]["center"] == [round((size - 1) / 2) for size in device.screen]
+    for request in requests:
+        content = request["messages"][1]["content"]
+        context = json.loads(content[0]["text"])
+        assert "screen" not in context["current_page"]
+        for outcome in context["recent_outcomes"]:
+            for key in ("page_before", "page_after"):
+                assert not outcome.get(key) or "screen" not in outcome[key]
+        for part in content[1:]:
+            if part["type"] == "text":
+                assert part["text"] in ("previous image; coordinates 0..1000", "current image; coordinates 0..1000")
+
+
 def test_coordinate_action_without_a11y_target_records_no_invented_node(monkeypatch):
     enable(monkeypatch, [action(point=[500, 500])])
     agent = loop.Agent("goal", device=VisualDevice([[]]), vision_only=True, vision_mode="fast")
@@ -737,7 +756,7 @@ def test_visual_boxes_use_current_table_for_initial_and_later_recordings(monkeyp
         assert (tmp_path / page["image_file"]).read_bytes() == base64.b64decode(page["screenshot"])
         assert page["visual_signature"] == raw["visual_signature"]
         saved_tree = json.loads((tmp_path / page["a11y_file"]).read_text(encoding="utf-8"))
-        assert saved_tree["node_count"] == 2 and saved_tree["duplicate_group_count"] == 0
+        assert saved_tree["node_count"] == (2 if has_tree else 0) and saved_tree["duplicate_group_count"] == 0
     assert device.visual_reads == 2  # No extra device read for annotations.
 
 

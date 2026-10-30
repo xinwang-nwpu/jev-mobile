@@ -131,6 +131,27 @@ class AccessibilityTreeBuilderTest {
         }
     }
 
+    @Test
+    fun buildFullAccessibilityTreeJson_preservesActionIdsAndLabels() {
+        val root = node("root")
+        configureNode(root)
+        val click = mockk<AccessibilityNodeInfo.AccessibilityAction>()
+        val custom = mockk<AccessibilityNodeInfo.AccessibilityAction>()
+        every { click.id } returns 16
+        every { click.label } returns null
+        every { custom.id } returns 123456
+        every { custom.label } returns "Custom action"
+        every { root.actionList } returns listOf(click, custom)
+
+        val actions = AccessibilityTreeBuilder.buildFullAccessibilityTreeJson(root)!!.getJSONArray("actionList")
+
+        assertEquals(2, actions.length())
+        assertEquals(16, actions.getJSONObject(0).getInt("id"))
+        assertEquals("", actions.getJSONObject(0).getString("label"))
+        assertEquals(123456, actions.getJSONObject(1).getInt("id"))
+        assertEquals("Custom action", actions.getJSONObject(1).getString("label"))
+    }
+
     private fun node(name: String): AccessibilityNodeInfo {
         return mockk(name = name, relaxed = true)
     }

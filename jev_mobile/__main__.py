@@ -225,8 +225,9 @@ def main(argv=None) -> int:
         print("No task: set `task` in config.yaml or pass --task.", file=sys.stderr)
         return 1
     vision_only = args.vision_only or config["vision_only"]
-    if not vision_only and not os.environ.get("TYPESAFE_API_KEY"):
-        print("TYPESAFE_API_KEY is missing; set it in the environment or .env.", file=sys.stderr)
+    fast_backend = os.environ.get("FAST_MODEL_BACKEND", "jev").strip().lower()
+    if not vision_only and fast_backend == "jev" and not (os.environ.get("FAST_MODEL_API_KEY") or os.environ.get("TYPESAFE_API_KEY")):
+        print("FAST_MODEL_API_KEY is missing; set it in the environment or .env.", file=sys.stderr)
         return 1
 
     record_dir = args.record_dir or config["record_dir"] or task_run_dir(task)
@@ -251,6 +252,9 @@ def main(argv=None) -> int:
             vision_only=vision_only,
             vision_mode=config["vision_mode"],
             vision_a11y_boxes=config["vision_a11y_boxes"],
+            fast_backend=fast_backend,
+            onejev_url=os.environ.get("FAST_MODEL_URL") or "http://127.0.0.1:8000/v1/systemone",
+            onejev_model=os.environ.get("FAST_MODEL_NAME") or "OneJev1.6-4B-Q4_K_M",
         )
     except (OSError, RuntimeError, ValueError) as error:
         print("Cannot start run: %s" % error, file=sys.stderr)

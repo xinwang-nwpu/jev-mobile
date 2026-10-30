@@ -35,11 +35,15 @@ adb shell content query --uri content://ai.jev.bridge/version
 adb shell content insert --uri content://ai.jev.bridge/keyboard/input --bind base64_text:s:5L2g5aW9
 adb shell content insert --uri content://ai.jev.bridge/keyboard/clear --bind clear:b:true
 adb shell content insert --uri content://ai.jev.bridge/keyboard/key --bind key_code:i:66
+# 对当前前台应用中唯一、启用的可编辑控件调用 SET_TEXT；此例文本为 hello world。
+adb shell content insert --uri content://ai.jev.bridge/accessibility/set_text --bind package_name:s:com.example --bind resource_name:s:input --bind base64_text:s:aGVsbG8gd29ybGQ=
 ```
 
-`state` 与 `state_full` 同样返回精简完整树；`a11y_tree` 与 `a11y_tree_full` 只返回树。`state_full` 的结构为 `{a11y_tree, phone_state, device_context}`。节点保留 text、contentDescription、resourceId、className、packageName、boundsInScreen、交互状态和 children。多窗口根仍合并，循环与最大深度仍限制；节点由树构建器回收。
+`state` 与 `state_full` 同样返回精简完整树；`a11y_tree` 与 `a11y_tree_full` 只返回树。`state_full` 的结构为 `{a11y_tree, phone_state, device_context}`。节点保留 text、contentDescription、resourceId、className、packageName、boundsInScreen、交互状态、actionList 和 children。`actionList` 是 Android 节点声明的动作数组，每项包含数值 `id` 和可为空的 `label`；它只用于观察，不会直接执行动作。多窗口根仍合并，循环与最大深度仍限制；节点由树构建器回收。
 
 中文输入必须已经选中此输入法，并且目标输入框具有 InputConnection。输入成功返回含 `status=success` 的 URI，message 区分 `verified` 和 `accepted_unverified`；后者只表示输入法接受了提交，仍需 Python 的动作后观察确认。提交状态未知、会话变化或拒绝会抛出错误，不能自动当成“没输入过”重复提交。
+
+`accessibility/set_text` 用 package_name 和 resource_name 拼成完整 resource_id，在前台应用中查找唯一启用的可编辑节点，并直接调用该节点声明的 Android `ACTION_SET_TEXT`，无需切换输入法。接口会替换原文，返回 accepted_unverified 后应重新观察文本确认效果；ID 重复、节点不支持该动作或动作被拒绝时会报错。
 
 `content insert` 需要至少一个 `--bind` 参数，因此清空示例也传入 `clear:b:true`。部分系统不会打印 insert 返回的 URI；命令退出成功后，仍应通过 `state_full` 的输入框文字或截图确认实际效果。空输入框的提示文字作为控件标签保留，不计入已输入内容。
 

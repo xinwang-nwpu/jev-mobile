@@ -13,6 +13,9 @@ import ai.jev.bridge.BuildConfig
 import ai.jev.bridge.input.BridgeKeyboardIME
 import org.json.JSONArray
 import org.json.JSONObject
+import java.nio.ByteBuffer
+import java.nio.charset.CodingErrorAction
+import java.util.Base64
 
 class BridgeContentProvider : ContentProvider() {
     override fun onCreate() = true
@@ -54,7 +57,20 @@ class BridgeContentProvider : ContentProvider() {
 
     override fun insert(uri: Uri, values: ContentValues?): Uri {
         checkCaller()
-        val result = BridgeKeyboardIME.execute(uri.path?.trim('/') ?: "",
+        val path = uri.path?.trim('/') ?: ""
+        val result = if (path == "accessibility/set_text") {
+            val packageName = values?.getAsString("package_name") ?: error("package_name is required")
+            val resourceName = values.getAsString("resource_name") ?: error("resource_name is required")
+            require(packageName.isNotBlank() && resourceName.isNotBlank() && !resourceName.contains('/')) { "Invalid resource identifier" }
+            val resourceId = "$packageName:id/$resourceName"
+            val encoded = values.getAsString("base64_text") ?: error("base64_text is required")
+            require(encoded.length <= 65536) { "base64_text is too long" }
+            val text = Charsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(Base64.getDecoder().decode(encoded))).toString()
+            val service = BridgeAccessibilityService.instance ?: error("Enable Jev Bridge accessibility service first")
+            service.setText(resourceId, text)
+            "accepted_unverified"
+        } else BridgeKeyboardIME.execute(path,
             values?.getAsString("base64_text"), values?.getAsBoolean("clear") ?: true,
             values?.getAsInteger("key_code"))
         return Uri.Builder().scheme("content").authority(context!!.packageName).path("result")

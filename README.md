@@ -1,292 +1,142 @@
-# jev-mobile ⚡
+# jev-mobile
 
-**Android 手机自动化 agent：Jev 基于 A11Y 树快速决策，遇到问题后由视觉 agent 接管，ADB 直接执行。**
+Android 手机自动化项目：使用 A11Y 节点和模型选择操作，通过 ADB 执行；支持 TypeSafe Jev、本地多模态 OneJev，以及视觉智能体接管和完成复核。
 
-[English](README.en.md)
+[English](README.en.md) · [Jev Bridge](android/jev-bridge/README.md) · [视觉智能体设计](docs/visual-agent.md)
 
-给它一句自然语言目标，例如"打开设置，把飞行模式开关打开"。[TypeSafe Jev](https://docs.typesafe.ai/) 从 A11Y 元素表里选出操作和目标元素；快路径的 `TYPE_TEXT` 由一个小 LLM 生成文本。配置视觉模型后，卡住时改用截图决策，保留原任务和执行历史。
-
-## 演示
-针对任务"在哔哩哔哩，播放龙卷风视频"，总共用时18秒每次动作决策只需要2-3s!，完全不需要多模态大模型参与token消耗量极小。
-
-<a href="docx/demo.mp4"><img src="docx/demo.gif" alt="真机演示：一句自然语言目标，Jev 每步一次请求完成决策与执行" width="320" /></a>
-
-[观看 MP4](docx/demo.mp4)
-
-## 动作空间
-
-每次观察（一次 A11Y 树快照）产生一个新的索引化元素表：
+## 运行流程
 
 ```text
-[1] EditText  query        · value=""
-[2] TextView  Go
-...
-
-操作：CLICK、TYPE_TEXT、SCROLL_UP、SCROLL_DOWN、BACK、HOME、ENTER、WAIT、DONE、BLOCKED
+任务 + 当前页面
+   ↓
+Jev / OneJev 选择动作和目标
+   ↓
+ADB 或 Jev Bridge 执行 → 重新观察 → 下一步
+   ↓ 遇到问题或 OneJev 提议完成
+视觉智能体接管 → 执行或复核 → 结果
 ```
 
-```text
-                      一次 TypeSafe 请求
-                     ┌───────────────────────────┐
-A11Y树 → 元素表 ────→ │ operation（选哪个操作）      │
-                     │ click_target（点谁）         │
-                     │ type_text_target（往哪输）    │
-                     └─────────────┬─────────────┘
-                       只消费与所选操作匹配的目标头
-                                   │
-                    CLICK [2] ────┤──→ adb input tap
-                TYPE_TEXT [1] ────┘
-                          ↓
-                   小 LLM → 文本 → adb 键盘
+快路径从 A11Y 树生成本轮可操作节点表。Jev 使用操作、目标和完成判定；OneJev 接收截图和动作候选，在一次选择中决定操作和目标，完成提议交给视觉智能体复核。快路径输入文字由 `TEXT_MODEL_*` 指定的文本模型生成。
+
+视觉智能体支持截图和 A11Y 编号，提供 planned（规划、执行、复核）与 fast（执行、复核）两种流程。`vision_only: true` 从第一步使用视觉智能体；配置视觉模型并启用 `vision_fallback` 时，快路径遇到模型错误、无目标、执行错误或卡住等情况可以切换到视觉路径。完成复核依据观察和执行记录判断，不保证模型判断始终正确。
+
+Jev Bridge 是项目的 Android 辅助 App，负责获取无障碍树、手机状态和中文输入。Python 端优先通过 ADB 转发的本机 HTTP 通道通信，失败时回退 ContentProvider；也支持兼容 Portal 和 `uiautomator`。截图、点击、滑动等由 ADB 执行。Bridge 还提供直接调用 `ACTION_SET_TEXT` 的独立接口，详见 [Bridge 接口说明](android/jev-bridge/README.md)。
+
+## 快速开始
+
+需要 Python 3.9+、[Android platform-tools](https://developer.android.com/tools/releases/platform-tools)、已开启 USB 或无线调试的 Android 设备。建议安装并启用 [Jev Bridge](android/jev-bridge/README.md) 的无障碍服务和输入法，以读取节点和输入中文。
+
+```powershell
+pip install -e .
+Copy-Item .env.example .env
+Copy-Item config.example.yaml config.yaml
+adb devices
+python -m jev_mobile --task "打开设置"
 ```
 
-目标问题都是投机的：若操作是 `CLICK`，只有 `click_target` 会被执行。两个决策、**一次网络往返**；每个目标头只包含与该操作兼容的元素。快路径的元素索引由代码分配；视觉路径的坐标先做范围与类型校验。两条路径都只执行预定义动作，不允许模型生成 shell 命令。
+在 `.env` 中配置快模型、文本模型和视觉模型；在 `config.yaml` 中配置设备、任务、等待时间和视觉模式。真实密钥保存在本地 `.env`，不要提交到 Git。
 
-**完成判定独立成题。** 快路径同一次请求里求值 noul 题「当前目标是否已达成」：判定为真（≥ 0.5）即可结束任务。否决 DONE 时先 WAIT 重判；连续两次否决后，第三次 DONE 交给视觉链路。未启用视觉时保留原来的第三次 DONE 放行规则。视觉完成由 Planner 或 Executor 提议，再重新截图交给独立 Verifier 逐项检查原始任务清单；证据不足则重新规划修复。
+### 快模型配置
 
-## 快慢两级执行
-
-视觉模块研究本地 Mobilerun 的任务状态、Manager/Executor、工具执行、截图和推理纠错机制后独立重写，形成「规划 → 单步执行 → 结果反馈 → 重规划 / 完成复核」循环。源码、协议和提示词均独立编写；不需要安装 Mobilerun 或 LlamaIndex，图像处理新增 Pillow。[实现对照与完整说明](docs/visual-agent.md)。
-
-在 `.env` 中设置以下变量；模型必须支持图片输入和 OpenAI 兼容的 Chat Completions JSON 输出：
+本地 OneJev 需要单独部署并启动支持 SystemOne 接口的服务；模型文件和服务不包含在本仓库中：
 
 ```dotenv
+FAST_MODEL_BACKEND=onejev
+FAST_MODEL_URL=http://127.0.0.1:8000/v1/systemone
+FAST_MODEL_NAME=OneJev1.6-4B-Q4_K_M
+FAST_MODEL_API_KEY=
+```
+
+使用 TypeSafe Jev 时：
+
+```dotenv
+FAST_MODEL_BACKEND=jev
+FAST_MODEL_URL=https://api.typesafe.ai/v1/systemone
+FAST_MODEL_NAME=jev-latest
+FAST_MODEL_API_KEY=你的密钥
+```
+
+旧版 `TYPESAFE_API_KEY` 和 `TYPESAFE_MODEL` 在对应新变量为空时仍可读取。OneJev 必须使用截图，不能传 `--no-screenshots`；单次动作候选超过 255 项或请求失败时，配置了视觉接管则交给视觉智能体。
+
+### 文本和视觉模型
+
+需要输入文字时配置支持 OpenAI 兼容 Chat Completions 的文本模型；视觉接管和完成复核需要支持图片输入的视觉模型：
+
+```dotenv
+TEXT_MODEL_API_KEY=你的密钥
+TEXT_MODEL_BASE_URL=https://你的服务/v1
+TEXT_MODEL=你的文本模型
 VISION_MODEL_API_KEY=你的密钥
-VISION_MODEL_BASE_URL=https://openrouter.ai/api/v1
-VISION_MODEL=你的视觉模型名
+VISION_MODEL_BASE_URL=https://你的服务/v1
+VISION_MODEL=你的视觉模型
 ```
 
-同时配置密钥和模型名后默认启用；未配置时继续使用原来的快路径。切换条件是 A11Y 读取失败、没有点击/输入目标、决策模型失败、执行异常、连续三步无变化、同一按钮四次点击使页面往返切换、或完成判定持续冲突。
+Planner、Executor 和 Verifier 默认使用 `VISION_MODEL`，可分别使用 `VISION_PLANNER_MODEL`、`VISION_EXECUTOR_MODEL`、`VISION_VERIFIER_MODEL` 覆盖；其他选项见 [.env.example](.env.example)。
 
-视觉输入按角色裁剪：Planner 和 Verifier 保留全程精简动作摘要、最近 3 次结果；Executor 使用当前计划、当前控件和最近 2 次结果，另保留早期输入原文。原始任务和约束始终提供，完整审计记录留在 trace；记忆由 Planner 维护为最多 20 个稳定 key 的当前事实快照。支持点/区域点击、长按、替换/追加/已聚焦输入、任意方向滑动、启动已安装 App、返回、主页、回车和可调等待。坐标为 0–1000 整数，按原生 PNG 尺寸映射，图片等比例缩放且不裁剪。
-
-`config.yaml` 用 `vision_mode` 选择视觉流程，纯视觉入口和 Jev 接管都生效：
+### 运行配置
 
 ```yaml
-vision_mode: fast  # planned 为原来的规划模式（默认）
-vision_a11y_boxes: true  # 给视觉截图添加控件编号框，false 关闭，省略时关闭
+task: "打开设置"
+adb_path: 'C:\platform-tools\adb.exe'
+device: null                 # 多设备时填写 adb serial
+vision_only: false           # true：只使用视觉智能体
+vision_fallback: true        # 快路径遇到问题时允许视觉接管
+vision_mode: fast            # fast 或 planned
+vision_a11y_boxes: true      # 给截图叠加节点框和临时编号
+action_interval: 1.0         # 每次动作后等待秒数，再观察页面；0 为不额外等待
 ```
 
-编号框采用彩色边框和数字角标，与当前 A11Y 控件表共用编号。此开关对两个视觉模式和保存的视觉截图都生效；关闭时保留坐标网格。无可用 A11Y 编号时只提供网格和坐标操作。标注使用本轮已读取的数据，不增加手机查询或模型请求，也不参与页面变化判断。
+`action_interval` 是固定等待，不保证页面已经稳定。截图与 A11Y 是独立读取，同一 Activity 内布局变化可能造成截图、节点位置和执行坐标不一致；对发送消息等操作，应留意目标页面和执行结果。
 
-fast 跳过 Planner，直接由 Executor 看图选择下一步；异常由 Executor 结合新观察与反馈自行恢复。执行前完全不复读或核对页面、窗口、尺寸及 A11Y 目标，直接使用本轮观察中解析出的坐标执行；预测前也不额外检查焦点。动作后的正常观察和独立 Verifier 完成复核保留，复核后不再额外检查焦点。输入和发送仍分步执行。
+## 动作和观察
 
-planned 模式中，Planner 首次规划后，Executor 根据每轮截图、累计摘要和实际动作结果判断剩余工作，持续执行；程序不维护阶段计数或校验完成阶段编号。出现偏差、失败、卡住、过期动作或完成复核否决时再重规划。正常步骤不重复调用 Planner，Executor 的完成提议也必须经过独立复核。
+快路径支持 `CLICK`、`TYPE_TEXT`、滚动、返回、主页、回车、等待、完成和阻塞。视觉路径支持按 A11Y 编号或坐标点击、长按、输入、滑动、启动 App、返回、主页、回车和等待。编号只对当前观察有效；模型输出不会作为 shell 命令执行。
 
-交接后视觉接管剩余任务，共享 60 次动作尝试和 240 次决策模型调用尝试，含规划、执行、复核、失败和格式纠正。无效输出每阶段最多 3 次尝试；执行失败、卡住或完成被否决会反馈重规划，连续 3 次恢复后阻塞。`--no-screenshots` 仅跳过快路径截图；关闭恢复用 `--no-vision-fallback`。轨迹保存模式、子目标、前后页面、失败、各角色响应和用量。
+动作完成后重新观察。连续无变化或反复切换页面时，快路径可以转入视觉恢复。视觉 planned 模式对编号目标执行前检查当前窗口和节点；视觉 fast 跳过执行前复读。OneJev 的完成提议需要配置视觉模型复核；TypeSafe Jev 保留独立的目标完成判定。
 
-编号守卫优先轻量读取窗口、当前逻辑尺寸和 A11Y，厂商输出不支持时保留完整视觉校验。trace.device_timings 保存设备阶段计时，round_timings 保存每轮模型、设备和其余开销，失败轮次也记录；CLI 标明角色请求耗时并显示整轮统计。TYPE_TEXT 可在一次动作内聚焦并输入，提示词避免为此单独 CLICK，输入和提交仍分开。
+每次运行默认在 `runs/<任务名>/` 保存轨迹和页面数据：
 
-可从第一步直接使用视觉链路，无需 Jev 或文本助手密钥：
+- `trace.json`：动作、目标、结果、模式切换、模型用量和阶段耗时。
+- `*.a11y.json`：进入当前操作表的节点属性和重复标记；保留节点的 `actionList`，以平铺形式保存。
+- 截图：视觉路径和启用截图的快路径保存的页面图像。
+
+`history[].target_node` 保存动作前目标的 resource ID、完整类名、文字、无障碍描述、原生屏幕边界及点击、编辑、启用、勾选、选中、焦点状态。纯坐标或无节点的操作该字段为空。重复检测只对可见、启用且边界有效的节点进行，以 `resourceId`、`className`、`text`、`contentDescription` 四项完全相同为判据。
+
+单独读取当前页面、导出整棵树的重复标注及带框截图：
 
 ```powershell
-python -m jev_mobile --vision-only --task "你的任务"
+python script/capture_a11y.py --device 设备序列号
 ```
 
-也可配置 `vision_only: true`。提示词位于 `jev_mobile/visual_prompts.py`；默认三种角色共用 `VISION_MODEL`，可通过 `VISION_PLANNER_MODEL` / `VISION_EXECUTOR_MODEL` / `VISION_VERIFIER_MODEL` 分别指定。
+脚本的红框表示重复节点，绿框表示唯一节点；智能体的彩色编号框由 `vision_a11y_boxes` 控制，两者用途不同。
 
-视觉路径也提供当前 A11Y 编号表，支持 `{"action":"CLICK","index":1}` 这种目标参数，以及按编号长按/输入；执行动作时，模型实际返回还须包含 status、summary、reason 和 expected_effect。编号复用 Jev 元素表，planned 执行前复读核对，fast 直接按本轮观察解析出的目标执行。A11Y 不可用时保留坐标操作；一次探测失败后在本次设备连接内停用后续探测，重跑会重新尝试。详见 [编号与坐标执行](docs/visual-agent.md#a11y-编号与坐标共同执行)。
-
-## 为什么快
-
-- **每步只发一次模型请求。** 操作头、所有目标头和「目标是否已达成」的独立判定（noul）共享同一份观察状态，在同一次请求里并行求值。
-- **默认循环不截图。** Jev 消费结构化状态：className、text、contentDescription、resourceId、bounds、checked/selected 等语义属性。
-- **一次 A11Y 读取覆盖全部状态，且三路并行。** 优先读 Jev Bridge（`ai.jev.bridge`），0.1.4+ 自动经 ADB 转发的本机 HTTP 获取整棵树和手机状态，中文输入也复用此通道；采用 Python 标准库，无需额外依赖。不可用时回退 ContentProvider，也兼容原 Portal（`com.mobilerun.portal` / `com.droidrun.portal`）；未安装时回退 `uiautomator dump /dev/tty`。树、焦点窗口、截图并发执行，一次观察只花最慢一路的时间。截图仍走 ADB；已发出的输入请求若结果未知，先重新观察，不自动重放。
-- **廉价的新鲜度守卫。** Jev 和 planned 预测前比较焦点窗口；Jev 接受 DONE/BLOCKED 前比对语义指纹。planned 视觉路径检查焦点窗口，避免用像素完全相等拒绝动画画面；视觉 fast 跳过这些额外检查。
-- **文本按需生成、按路径优化。** 输入框清空在设备端一条 shell 完成（`MOVE_END` + 循环 `DEL`）；中文等非 ASCII 文本走 ADB Keyboard 广播；IME 只在首次输入时切换、结束时恢复。
-- **快路径用语义指纹。** 连续 3 步无变化且非 WAIT，或同一控件在两个状态间反复切换时转入视觉；未启用恢复时停止。视觉用未叠加网格的灰度摘要过滤微小变化，卡住后重规划；动画仍可能被当成变化，全程预算限制持续循环。
-
-## 快速开始（复现步骤）
-
-从零到跑通共五步：**装依赖 → 配密钥 → 配任务 → 连手机 → 运行**。
-
-### 前置条件
-
-- Python ≥ 3.9；
-- 本机可用 adb：[platform-tools](https://developer.android.com/tools/releases/platform-tools) 下载解压即可，无需 Android Studio；
-- 一台安卓手机：开启「开发者选项 → USB 调试」，数据线连接电脑，在手机弹窗上允许调试；
-- 一个 [TypeSafe Jev](https://docs.typesafe.ai/) 的 API Key（必填）；任务涉及输入文字时，另备一个任意 OpenAI 兼容模型（DeepSeek、OpenRouter 等）的 Key。
-
-### 1. 安装依赖并自检
-
-```bash
-cd jev-mobile
-pip install -e .          # 用 uv 的话：uv sync（仓库自带 uv.lock）
-pip install pytest
-python -m pytest          # 离线测试，无需手机与密钥；全部通过说明环境就绪
-```
-
-### 2. 配置密钥（.env）
-
-```bash
-copy .env.example .env    # Windows CMD；Git Bash / macOS / Linux 用 cp
-```
-
-打开 `.env`：必填 `TYPESAFE_API_KEY`；需要打字时再填 `TEXT_MODEL_API_KEY`（默认对接 DeepSeek，改 `TEXT_MODEL_BASE_URL` 可指向任意 OpenAI 兼容接口）；adb 不在 PATH 时把 `ADB_PATH` 写成绝对路径。完整变量说明见[下文表格](#环境变量)。
-
-### 3. 配置任务（config.yaml）
-
-```bash
-copy config.example.yaml config.yaml    # Git Bash / macOS / Linux 用 cp
-```
-
-最小配置只需改 `task` 一行，其余键保持默认（每个键的含义见 `config.example.yaml` 注释）：
-
-```yaml
-task: "打开设置，把飞行模式开关打开"
-adb_path: 'C:\platform-tools\adb.exe'   # adb 已在 PATH 时可留空
-```
-
-`config.yaml` 放在运行目录或仓库根目录均可（两处都没有时走默认值，用 `--task` 也能直接跑）。
-
-### 4. 连接手机并确认
-
-```bash
-adb devices               # 应列出设备且状态为 device；显示 unauthorized 时在手机上允许调试
-```
-
-### 5. 运行
-
-```bash
-python -m jev_mobile
-```
-
-正常输出形如：
-
-```text
-[   0.8s] 决策  CLICK 0.62 | DONE 0.15 | SCROLL_DOWN 0.11 | +6  conf=0.62  512ms  目标: [12] 0.93 [3] 0.04  goal=0.02
-[   1.3s] CLICK [12] 飞行模式 changed=True → Settings
-...
-status=done steps=2 decisions=8 elapsed=31.7s  决策均值 540ms
-tokens 决策 in≈8600 out≈420 · 合计 in≈8600 out≈420
-final: com.android.settings / Settings · "设置"
-```
-
-每步记录默认写入 `runs/<任务名>/`：`trace.json`（逐步观察、决策概率、执行动作、token 汇总）和逐步截图（`--record-dir` 会自动开启截图）。退出码 0 表示 status=done。
-
-`trace.json` 的 `history[].target_node` 保存本次操作目标在动作前观察中的 11 项属性：完整 `resource_id`、完整 `class_name`、原始 `text`、原始 `content_description`、原生像素 `bounds`，以及 `clickable`、`editable`、`enabled`、`checked`、`selected`、`focused`。文字和描述不按模型标签长度截断；未上报的属性记为 `null`。该记录适用于 Jev 和视觉编号操作，只写本地轨迹，不增加模型输入或设备查询。纯坐标操作未关联 A11Y 节点，以及系统按键等无目标节点的操作，`target_node` 为 `null`。
-
-每次保存观察时，另外生成 `*.a11y.json`，保留采集到的整棵 A11Y 树和父子结构。仅对可见、启用、边界有效且与屏幕相交的节点检查重复；没有可见性字段时按边界判断，缺少启用字段时视为启用。重复条件为 `resourceId`、`className`、`text`、`contentDescription` 四项完全相同，不去空格或模糊匹配。参与检测的节点包含 `is_duplicate` 和 `match_count`（匹配总数，包含自身）；未参与检测的节点这两项为 `null`。文件包含总节点数、参与检测数、重复组数、重复节点数和分组清单。关闭截图仍保存树；扫描不增加设备查询或模型请求。实现位于 `jev_mobile/selectors.py`。
-
-单独读取当前页面并导出重复标注和带框截图，无需模型密钥：
+## 命令行
 
 ```powershell
-python script/capture_a11y.py --device 192.168.1.58:38581
+python -m jev_mobile --task "打开设置" --device 设备序列号
+python -m jev_mobile --vision-only --task "打开设置"
+python -m jev_mobile --action-interval 1.5 --task "打开设置"
 ```
 
-脚本读取 `config.yaml` 的 ADB 路径和设备配置，命令行参数优先。默认输出到 `runs/a11y_capture/<时间>/`，也可用 `--output-dir` 指定目录。`a11y.json` 保存整棵标注后的树；`screen-boxed.png` 在现有坐标网格上为参与重复检测的节点画框，重复节点为红框，唯一节点为绿框。
+命令行可覆盖任务、ADB 路径、设备、起始包名、记录目录、截图和动作等待时间；`--no-vision-fallback` 关闭视觉接管，`--quiet` 精简日志。完整参数可通过 `python -m jev_mobile --help` 查看。
 
-不想建配置文件时一行直接跑（其余参数见[下文](#命令行参数)）：
+## 代码结构
 
-```bash
-python -m jev_mobile --task "打开设置，把飞行模式开关打开" --start-package com.android.settings
-```
-
-### 可选加速件
-
-- 设备安装 [Jev Bridge](android/jev-bridge/README.md)，打开 App 并启用无障碍服务与 Jev Bridge Keyboard，即可提供快速控件读取及中文输入；也兼容原 Droidrun / Mobilerun Portal。未装辅助 App 时自动回退 `uiautomator dump`（部分设备单次数秒）。
-- 中文输入也可使用 [ADB Keyboard](https://github.com/senzhk/ADBKeyBoard) 作为备用。Jev Bridge、Portal 输入法和 ADB Keyboard 均不可用时只能输入 ASCII。
-
-### 常见问题
-
-| 现象 | 处理 |
+| 位置 | 内容 |
 | --- | --- |
-| `adb devices` 显示 `unauthorized` | 在手机弹窗上允许调试；仍不行则在开发者选项里「撤销 USB 调试授权」后重插 |
-| 报 `TYPESAFE_API_KEY is missing` | `.env` 没创建或没填 Key，确认它在运行目录下 |
-| 每步观察前卡约 1s | 检查 Jev Bridge 无障碍服务是否启用；未装辅助 App 时走 uiautomator 回退路径 |
-| 已装 Portal，每步仍多约 1s | 这是逐帧截图；加 `--no-screenshots` 跳过截图、只留 `trace.json` |
-| 中文输不进去 | 在 Jev Bridge 中启用并选择输入法，或使用 ADB Keyboard |
+| `jev_mobile/agent.py` | 动作循环、快慢切换、执行记录和预算 |
+| `jev_mobile/model.py` | Jev、OneJev 选择请求及文本助手 |
+| `jev_mobile/device.py` | ADB、Bridge 通信、观察与执行 |
+| `jev_mobile/a11y.py`、`selectors.py` | 节点解析、动作候选、重复检测 |
+| `jev_mobile/vision.py`、`visual_prompts.py`、`visual_images.py` | 视觉规划、执行、复核、图片处理 |
+| `android/jev-bridge/` | Android 辅助 App 和接口 |
+| `script/capture_a11y.py` | 读取 A11Y 树并生成带框截图 |
+| `docs/` | 视觉实现、性能分析与研究笔记 |
 
-## 使用
+## 开发与许可
 
-命令行参数优先于 `config.yaml`，可临时覆盖任意配置（优先级：命令行参数 > `config.yaml` > 环境变量）：
-
-```bash
-python -m jev_mobile --task "打开设置，把飞行模式开关打开" --record-dir runs/demo
+```powershell
+python -m pytest
 ```
 
-### 命令行参数
-
-| 参数 | 说明 |
-| --- | --- |
-| `--task` | 自然语言任务目标（必填） |
-| `--start-package` | 起始 App 的包名，如 `com.android.settings`，首个观察前启动 |
-| `--adb-path` / `--device` | 覆盖 `ADB_PATH` / `ANDROID_DEVICE` |
-| `--record-dir` | 保存逐步截图与 `trace.json`；缺省自动按任务名存到 `runs/<任务名>/` |
-| `--screenshots` | 观察时附带截图（`--record-dir` 隐含开启） |
-| `--no-screenshots` | 跳过快路径截图，视觉接管后仍截图 |
-| `--no-vision-fallback` | 关闭视觉接管；`--no-screenshots` 本身不关闭视觉截图 |
-| `--vision-only` | 从第一步使用视觉规划/执行/复核，不需要 Jev 密钥 |
-| `--action-interval` | 每个动作执行后额外等待的秒数，默认 0（环境变量 `ACTION_INTERVAL`） |
-
-### 库
-
-```python
-from jev_mobile import Agent
-
-with Agent("打开设置，把飞行模式开关打开", start_package="com.android.settings") as agent:
-    for state in agent.run():
-        last = state["history"][-1] if state["history"] else None
-        print(state["elapsed_ms"], state["status"], last["action"] if last else "")
-```
-
-### 环境变量
-
-`.env` 自动读取；命令行参数优先：
-
-| 变量 | 用途 | 默认 |
-| --- | --- | --- |
-| `TYPESAFE_API_KEY` | Jev 决策模型密钥（必填） | — |
-| `TYPESAFE_MODEL` | 模型名 | `jev-latest` |
-| `TEXT_MODEL_API_KEY` | 文本生成模型密钥（需要打字时必填） | — |
-| `TEXT_MODEL_BASE_URL` | 任意 OpenAI 兼容接口 | `https://api.deepseek.com/v1` |
-| `TEXT_MODEL` / `TEXT_MODEL_REASONING` | 文本模型名 / 是否关思考 | `deepseek-chat` / — |
-| `VISION_MODEL_API_KEY` / `VISION_MODEL` | 视觉模型密钥 / 支持图片输入的模型名，同时设置才启用恢复 | — |
-| `VISION_MODEL_BASE_URL` | 视觉模型 OpenAI 兼容接口 | `https://openrouter.ai/api/v1` |
-| `VISION_PLANNER_MODEL` / `VISION_EXECUTOR_MODEL` / `VISION_VERIFIER_MODEL` | 各角色模型，端点与密钥共用 | 复用 `VISION_MODEL` |
-| `VISION_MODEL_TIMEOUT` | 视觉超时秒数，允许 1–300 | `90` |
-| `VISION_IMAGE_MAX_SIDE` | 完整截图最长边，允许 320–4096 | `1600` |
-| `VISION_CHANGE_THRESHOLD` | 灰度平均差异阈值，允许 0–255；仅用于卡住检测 | `3` |
-| `ADB_PATH` / `ANDROID_DEVICE` | adb 路径 / 设备序列号 | `adb` / 空 |
-| `ACTION_INTERVAL` | 每个动作执行后额外等待的秒数 | `0` |
-
-## 代码地图
-
-| 文件 | 职责 |
-| --- | --- |
-| `jev_mobile/agent.py` | 完整循环：predict → act → observe；独立目标判定把关终止、DONE 新鲜度校验、预算与卡住检测 |
-| `jev_mobile/a11y.py` | 一次快照 → 索引化动作空间（click/fill + 固定控件）、可见文本、语义指纹 |
-| `jev_mobile/device.py` | ADB 连接、Portal/uiautomator 树读取、tap/swipe/键盘输入、IME 管理 |
-| `jev_mobile/model.py` | TypeSafe 动态操作/目标头 + 小模型文本生成，选择结果校验 |
-| `jev_mobile/vision.py` | 视觉规划、执行请求、完成复核、共享上下文、校验与恢复 |
-| `jev_mobile/visual_prompts.py` | 独立编写的 Planner / Executor / Verifier 提示词 |
-| `jev_mobile/visual_images.py` | 完整图缩放、网格、原生尺寸契约、变化检测 |
-| `jev_mobile/config.py` | 加载 config.yaml（未知键报错，防拼写错误） |
-| `jev_mobile/questions.py` | 决策与文本指令 |
-| `scripts/jev_probe.py` | Jev 模型探测脚本：单独测试 Choice / Score / Noul 三种原语 |
-| `scripts/bench_a11y.py` | A11Y 获取方案基准：Portal state_full vs uiautomator |
-
-`jev_probe.py` 示例：
-
-```bash
-python scripts/jev_probe.py --question "选一个" --options 爬山 逛街      # Choice
-python scripts/jev_probe.py --type score --question "严重吗" --options 轻 中 重
-python scripts/jev_probe.py --type noul --question "这是紧急求助吗" --state "消息原文"
-python scripts/jev_probe.py --demo                                       # 一次请求混发三种问题
-```
-
-## 设计边界
-
-- **编号与坐标的守卫不同。** 视觉编号操作执行前复读 A11Y，编号表、窗口或尺寸改变就重新决策；快路径及视觉坐标操作保留焦点守卫和事后变化检测，同窗口布局变化仍可能让坐标过期。复读 A11Y 有额外开销。
-- **没有下拉选择（SELECT）操作。** Android 的下拉控件统一走点击流程。
-- **上限：** 动作尝试 60 次、决策模型调用尝试 240 次、快路径元素 250 个；文本助手另外统计，次数受动作预算约束。
-- **uiautomator 回退路径慢**（单次 dump 约 1s，部分设备可达数秒）；装 Portal 是主要加速手段，但 Portal 查询自身的耗时（约 100ms~1s，因设备而异）构成每步观察耗时的下限。
-- **完成仍是模型判断。** 视觉增加了新截图上的独立复核，同一模型的两次判断仍可能同时出错。正常 Jev 完成不强制调用视觉；纯视觉每次完成都复核。没有自动切回快路径，也未移植云设备、iOS、MCP 或技能系统。尚未验证实机成功率与参考工程相同。
-
-## 开发
-
-```bash
-python -m pytest      # 离线测试，无需设备与网络
-```
-
-测试覆盖：动作空间构建（同一节点多操作共享一个索引）、选择结果校验、输入流程（文本助手 + 执行记录）、DONE 过期重判、动作预算与卡住检测等。
+Android App 的构建和测试命令见 [Jev Bridge README](android/jev-bridge/README.md)。项目许可见 [LICENSE](LICENSE)，Jev Bridge 的来源和许可见 [NOTICE](android/jev-bridge/NOTICE.md)。

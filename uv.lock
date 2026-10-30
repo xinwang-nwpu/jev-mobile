@@ -193,7 +193,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "httpx", extras = ["http2"], specifier = ">=0.27" },
-    { name = "pillow", specifier = ">=10" },
+    { name = "pillow", specifier = ">=10.1" },
     { name = "pyyaml", specifier = ">=5.4" },
 ]
 

@@ -35,6 +35,36 @@ def simple_tree():
     return [node(text="Continue", clickable=True)]
 
 
+@pytest.mark.parametrize("failure", [False, True])
+def test_onejev_hands_off_completion_or_model_error(monkeypatch, failure):
+    device = FakeDevice([simple_tree()])
+    monkeypatch.setattr(device, "observe_visual", lambda: device.observe(screenshot=True), raising=False)
+    monkeypatch.setattr(agent_module.vision, "configured", lambda: True)
+
+    def decide(page, goal, history, url, model):
+        if failure:
+            raise RuntimeError("local model unavailable")
+        return make_decision("DONE", page=page)
+
+    monkeypatch.setattr(agent_module, "choose_onejev", decide)
+    agent = Agent("goal", device=device, fast_backend="onejev")
+    agent.tick()
+    assert agent.state["mode"] == "vision"
+    assert agent.state["handoff"]["reason"] == ("model_error" if failure else "completion_review")
+    assert agent.state["status"] == "ready" and not device.acts
+
+
+def test_onejev_does_not_finish_without_verifier(monkeypatch):
+    device = FakeDevice([simple_tree()])
+    monkeypatch.setattr(device, "observe_visual", lambda: device.observe(screenshot=True), raising=False)
+    monkeypatch.setattr(agent_module, "choose_onejev", lambda page, goal, history, url, model:
+                        make_decision("DONE", page=page))
+    agent = Agent("goal", device=device, fast_backend="onejev", vision_fallback=False)
+    with pytest.raises(RuntimeError, match="visual verifier"):
+        agent.tick()
+    assert agent.state["status"] == "blocked"
+
+
 @pytest.mark.parametrize("operation", ["CLICK", "TYPE_TEXT"])
 @pytest.mark.parametrize("failed", [False, True])
 def test_history_saves_target_attributes_before_device_input(monkeypatch, operation, failed):
@@ -97,13 +127,30 @@ def test_every_recorded_observation_saves_the_tree_with_duplicate_annotations(mo
     history = agent.trace()["history"][0]
     before = json.loads((tmp_path / history["page_before"]["a11y_file"]).read_text(encoding="utf-8"))
     after = json.loads((tmp_path / history["page_after"]["a11y_file"]).read_text(encoding="utf-8"))
-    assert before["node_count"] == after["node_count"] == 3
+    assert before["node_count"] == after["node_count"] == 2
     assert before["duplicate_node_count"] == 2 and after["duplicate_node_count"] == 0
-    assert before["tree"][0]["children"][0]["resourceId"] == "com.example:id/item"
+    assert before["tree"][0]["resourceId"] == "com.example:id/item"
     assert agent.trace()["final_page"]["a11y_file"] == history["page_after"]["a11y_file"]
     assert "a11y_tree" not in agent.snapshot()["page"]
     assert len(list(tmp_path.glob("*.a11y.json"))) == 2 and not list(tmp_path.glob("*.png"))
     assert "is_duplicate" not in first
+
+
+def test_page_record_keeps_only_actionable_nodes_and_all_their_attributes(tmp_path):
+    editor = node(cls="android.widget.EditText", rid="app:id/input", clickable=True, editable=True)
+    editor.update(actionList=[{"id": 2097152, "label": ""}], isVisibleToUser=False)
+    tree = [node(cls="Root", children=[node(text="label"), editor,
+            node(text="disabled", clickable=True, enabled=False),
+            node(text="offscreen", clickable=True, bounds="[2000,0][2200,100]")])]
+    tree.extend(node(text="filler") for _ in range(250))
+    tree.append(node(text="beyond limit", clickable=True))
+    agent = Agent("goal", device=FakeDevice([tree]), record_dir=str(tmp_path), screenshots=False, vision_fallback=False)
+    report = json.loads((tmp_path / agent.state["page"]["a11y_file"]).read_text(encoding="utf-8"))
+    assert report["node_count"] == 1
+    saved = report["tree"][0]
+    assert saved["resourceId"] == "app:id/input" and saved["actionList"] == [{"id": 2097152, "label": ""}]
+    assert saved["isVisibleToUser"] is False and saved["children"] == []
+    assert "_descendant_label" not in saved and "index" not in saved
 
 
 class TestBasicLoop:

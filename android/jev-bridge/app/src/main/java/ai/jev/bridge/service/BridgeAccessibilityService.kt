@@ -12,6 +12,7 @@ import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
 import ai.jev.bridge.core.AccessibilityRootResolver
 import ai.jev.bridge.core.AccessibilityTreeBuilder
+import ai.jev.bridge.core.AccessibilityTextActions
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -44,6 +45,15 @@ class BridgeAccessibilityService : AccessibilityService() {
     }
 
     override fun onInterrupt() {}
+
+    fun setText(resourceId: String, text: String) {
+        val root = rootInActiveWindow ?: error("Active accessibility window unavailable")
+        try {
+            AccessibilityTextActions.setText(root, resourceId, text)
+        } finally {
+            root.recycle()
+        }
+    }
     override fun onUnbind(intent: Intent?): Boolean {
         if (instance === this) instance = null
         stopHttp()

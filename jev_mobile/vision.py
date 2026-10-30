@@ -298,7 +298,7 @@ class VisualAgent:
         def page_view(page):
             if not page:
                 return None
-            return {**{k: page.get(k) for k in ("app", "activity", "screen")}, "text": (page.get("text") or "")[:1500]}
+            return {**{k: page.get(k) for k in ("app", "activity")}, "text": (page.get("text") or "")[:1500]}
 
         def outcome(item, detailed=False):
             result = {k: item.get(k) for k in ("step", "mode", "operation", "text", "success", "error") if item.get(k) is not None}
@@ -351,8 +351,7 @@ class VisualAgent:
         content = [{"type": "text", "text": context_text}]
         for label, page in (("previous", self.previous_page), ("current", self.state["page"])):
             if page and page.get("screenshot"):
-                content += [{"type": "text", "text": "%s image; native screen %s, model image %s; coordinates 0..1000" % (
-                    label, page["screen"], page.get("model_screen", page["screen"]))},
+                content += [{"type": "text", "text": "%s image; coordinates 0..1000" % label},
                     {"type": "image_url", "image_url": {"url": "data:image/png;base64," + page["screenshot"]}}]
         messages = [{"role": "system", "content": prompt}, {"role": "user", "content": content}]
         timeout = float(os.environ.get("VISION_MODEL_TIMEOUT", "90"))

@@ -73,6 +73,20 @@ class TestActionSpace:
 
 
 class TestChoose:
+    def test_fast_model_env_configures_jev_connection(self, monkeypatch):
+        monkeypatch.setenv("FAST_MODEL_URL", "http://model.example/v1/systemone")
+        monkeypatch.setenv("FAST_MODEL_NAME", "configured-jev")
+        monkeypatch.setenv("FAST_MODEL_API_KEY", "configured-key")
+        state = make_state()
+        def fake_post(url, key, body):
+            assert (url, key, body["model"]) == ("http://model.example/v1/systemone", "configured-key", "configured-jev")
+            ids = body["questions"]["operation"]["criteria"]
+            return {"model": "configured-jev", "answers": {"operation": {
+                "choice": "DONE", "confidence": 1.0,
+                "probabilities": {name: float(name == "DONE") for name in ids}}}}
+        monkeypatch.setattr(model, "post_json", fake_post)
+        assert model.choose(state, "goal", [])["operation"] == "DONE"
+
     def test_one_request_decides_operation_and_targets(self, monkeypatch):
         state = make_state()
         operations = all_operations(state)
@@ -156,6 +170,41 @@ class TestValidateGoal:
         assert model.validate_goal({})["satisfied"] is None
         assert model.validate_goal({"noul": "yes"})["satisfied"] is None
         assert model.validate_goal({"noul": 1.5})["satisfied"] is None
+
+
+@pytest.mark.parametrize("selected,operation,target,choice", [
+    ("CLICK_2", "CLICK", "2", "tap-1"),
+    ("TYPE_TEXT_1", "TYPE_TEXT", "1", "type-0"),
+    ("DONE", "DONE", None, "DONE"),
+])
+def test_onejev_joint_choice_has_image_and_no_goal_gate(monkeypatch, selected, operation, target, choice):
+    state = make_state()
+    state.update(screenshot="YWJj", a11y_fingerprint="current")
+    captured = {}
+
+    def fake_post(url, key, body, *, timeout):
+        captured.update(body)
+        ids = body["questions"]["next_action"]["criteria"]
+        return {"model": "onejev", "answers": {"next_action": {
+            "choice": selected, "confidence": 0.9,
+            "probabilities": {identifier: float(identifier == selected) for identifier in ids}}}}
+
+    monkeypatch.setattr(model, "post_json", fake_post)
+    decision = model.choose_onejev(state, "打开 QQ", [], "http://localhost/v1/systemone", "onejev")
+    assert (decision["operation"], decision["target"], decision["choice"]) == (operation, target, choice)
+    assert list(captured["questions"]) == ["next_action"]
+    assert "elements" not in captured["state"]
+    assert captured["media"][0]["data"] == "data:image/png;base64,YWJj"
+    assert decision["goal"]["probability"] is None and "media" not in decision["request"]
+    assert all(0 <= n <= 1000 for n in captured["questions"]["next_action"]["criteria"]["CLICK_2"]["bounds"])
+    assert captured["questions"]["next_action"]["criteria"]["CLICK_2"]["label"] == "Go"
+    from jev_mobile.agent import _observed
+    assert _observed(decision)["action_candidates"] == captured["questions"]["next_action"]["criteria"]
+
+
+def test_onejev_rejects_missing_image():
+    with pytest.raises(ValueError, match="screenshot"):
+        model.choose_onejev(make_state(), "goal", [], "url", "model")
 
 
 class TestFieldText:

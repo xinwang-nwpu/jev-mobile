@@ -12,8 +12,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from xml.etree.ElementTree import ParseError
 
+from .a11y import _flatten, _visible_nodes
 from .device import Device, StalePage
-from .model import action_space, choose, field_context, field_text
+from .model import action_space, choose, choose_onejev, field_context, field_text
 from .selectors import annotate_duplicates
 from .questions import MAX_STEPS
 from . import vision, visual_images
@@ -29,7 +30,11 @@ def _observed(decision: Dict[str, Any]) -> Dict[str, Any]:
     state = decision.get("request", {}).get("state", {})
     page = dict(state.get("page", {}))
     page["text"] = str(page.get("text", ""))[:800]
-    return {"page": page, "elements": state.get("elements", [])}
+    observed = {"page": page, "elements": state.get("elements", [])}
+    candidates = decision.get("request", {}).get("questions", {}).get("next_action", {}).get("criteria")
+    if candidates is not None:
+        observed["action_candidates"] = candidates
+    return observed
 
 
 def usage_totals(state: Dict[str, Any]) -> Dict[str, Any]:
@@ -79,6 +84,9 @@ class Agent:
         vision_only: bool = False,
         vision_mode: str = "planned",
         vision_a11y_boxes: bool = False,
+        fast_backend: str = "jev",
+        onejev_url: str = "http://127.0.0.1:8000/v1/systemone",
+        onejev_model: str = "OneJev1.6-4B-Q4_K_M",
     ):
         task = task.strip() if isinstance(task, str) else ""
         if not task:
@@ -87,6 +95,10 @@ class Agent:
             raise ValueError("action_interval must be >= 0")
         if vision_mode not in ("planned", "fast"):
             raise ValueError("vision_mode must be planned or fast")
+        if fast_backend not in ("jev", "onejev"):
+            raise ValueError("fast_backend must be jev or onejev")
+        if fast_backend == "onejev" and not vision_only and screenshots is False:
+            raise ValueError("OneJev requires screenshots; remove --no-screenshots")
         if type(vision_a11y_boxes) is not bool:
             raise ValueError("vision_a11y_boxes must be true or false")
         if vision_only and not vision.configured():
@@ -98,6 +110,7 @@ class Agent:
         self._page_number = 0
         # None = recording implies screenshots; an explicit value always wins.
         self.screenshots = bool(self.record_dir) if screenshots is None else bool(screenshots)
+        self.fast_backend, self.onejev_url, self.onejev_model = fast_backend, onejev_url, onejev_model
         self.vision_fallback = vision_fallback and vision.configured()
         self.state: Dict[str, Any] = dict(
             goal=task,
@@ -119,6 +132,7 @@ class Agent:
             device_timings=[],
             round_timings=[],
             settings={"action_interval": self.action_interval, "fast_screenshots": self.screenshots,
+                      "fast_backend": fast_backend,
                       "vision_only": vision_only, "vision_fallback": self.vision_fallback,
                       "vision_mode": vision_mode,
                       "vision_a11y_boxes": vision_a11y_boxes,
@@ -253,6 +267,8 @@ class Agent:
     def _observe(self) -> Dict[str, Any]:
         if self.state["mode"] == "vision":
             return self._visual_page()
+        if self.fast_backend == "onejev":
+            return self._visual_page()
         try:
             page = self.device.observe(screenshot=self.screenshots)
         except (RuntimeError, ValueError, ParseError):
@@ -310,7 +326,13 @@ class Agent:
         self._page_number += 1
         stem = "%06d-%03d" % (self.state["elapsed_ms"], self._page_number)
         if "a11y_tree" in page:
-            report = annotate_duplicates(page["a11y_tree"], page["screen"])
+            visible = _visible_nodes(_flatten(page["a11y_tree"]), page["screen"])
+            targets = {a["node"] for a in page["actions"] if a["kind"] in {"click", "fill"}}
+            if page.get("source") == "vision" and not page.get("a11y_fingerprint"):
+                targets.clear()
+            nodes = [{**{k: v for k, v in node.items() if k != "_descendant_label"}, "children": []}
+                     for i, node in enumerate(visible) if i in targets]
+            report = annotate_duplicates(nodes, page["screen"])
             report.update({k: page.get(k) for k in ("app", "activity", "source", "screen", "a11y_source", "a11y_error")})
             name = stem + ".a11y.json"
             (self.record_dir / name).write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -340,7 +362,10 @@ class Agent:
             else:
                 call = self._reserve_call("fast", "jev")
                 try:
-                    state["decision"] = choose(state["page"], state["goal"], state["history"])
+                    state["decision"] = (choose_onejev(state["page"], state["goal"], state["history"],
+                                          self.onejev_url, self.onejev_model)
+                                          if self.fast_backend == "onejev" else
+                                          choose(state["page"], state["goal"], state["history"]))
                     call.update(status="ok", model=state["decision"]["model"], usage=state["decision"]["usage"],
                                 latency_ms=state["decision"]["latency_ms"])
                 except Exception as error:
@@ -418,6 +443,11 @@ class Agent:
             return self.snapshot()
         goal = decision.get("goal") or {}
         if selected in {"DONE", "BLOCKED"}:
+            if selected == "DONE" and state["mode"] == "fast" and self.fast_backend == "onejev":
+                if self._handoff("completion_review"):
+                    return self._recover_page()
+                state["status"] = "blocked"
+                raise RuntimeError("OneJev completion requires a configured visual verifier")
             if state["mode"] == "vision" and selected == "BLOCKED":
                 state["answer"] = decision.get("reason", "")
             if selected == "BLOCKED" and self._handoff("blocked"):

@@ -146,6 +146,14 @@ object AccessibilityTreeBuilder {
                 put("isChecked", node.isChecked)
                 put("isSelected", node.isSelected)
                 put("isFocused", node.isFocused)
+                put("actionList", JSONArray().apply {
+                    node.actionList.forEach { action ->
+                        put(JSONObject().apply {
+                            put("id", action.id)
+                            put("label", action.label?.toString() ?: "")
+                        })
+                    }
+                })
                 put("children", childrenArray)
             }
         } catch (e: RuntimeException) {

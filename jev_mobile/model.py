@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import httpx
 
 from .questions import GOAL_ACHIEVED, NEXT_ACTION, TARGET, TEXT_VALUE
+from .a11y import parse_bounds
 
 # trust_env=False: system/registry proxies observed breaking the TLS handshake to this
 # endpoint; the API is reachable directly and credentials never need the proxy.
@@ -29,7 +30,8 @@ def post_json(url, key, body, *, timeout=None):
     for attempt in range(3):
         try:
             options = {"timeout": timeout} if timeout is not None else {}
-            response = _client().post(url, json=body, headers={"Authorization": "Bearer %s" % key}, **options)
+            headers = {"Authorization": "Bearer %s" % key} if key else {}
+            response = _client().post(url, json=body, headers=headers, **options)
         except httpx.HTTPError:
             raise RuntimeError("Model connection failed; no action executed.") from None
         if response.status_code in {429, 529, 503} and attempt < 2:
@@ -141,7 +143,7 @@ def choose(state, goal, history):
             "instructions": {"goal": goal, "operation": operation, "rules": [NEXT_ACTION, TARGET]},
         }
     body = {
-        "model": os.environ.get("TYPESAFE_MODEL", "jev-latest"),
+        "model": os.environ.get("FAST_MODEL_NAME") or os.environ.get("TYPESAFE_MODEL") or "jev-latest",
         "state": {
             "page": {k: state[k] for k in ("app", "activity", "text")},
             "elements": elements,
@@ -152,7 +154,8 @@ def choose(state, goal, history):
         "questions": questions,
     }
     started = time.perf_counter()
-    result = post_json("https://api.typesafe.ai/v1/systemone", os.environ["TYPESAFE_API_KEY"], body)
+    result = post_json(os.environ.get("FAST_MODEL_URL") or "https://api.typesafe.ai/v1/systemone",
+                       os.environ.get("FAST_MODEL_API_KEY") or os.environ.get("TYPESAFE_API_KEY", ""), body)
     operation_answer = validate_choice(result["answers"].get("operation", {}), operations)
     operation = operation_answer["choice"]
     target = None
@@ -183,6 +186,66 @@ def choose(state, goal, history):
         "latency_ms": round((time.perf_counter() - started) * 1000),
         "request": body,
     }
+
+
+def choose_onejev(state, goal, history, url, model):
+    """Choose an operation and its target together using the current screenshot."""
+    if not state.get("screenshot") or not state.get("a11y_fingerprint"):
+        raise ValueError("OneJev requires a screenshot and a current A11Y element table")
+    _, targets, controls = action_space(state["actions"])
+    if not targets:
+        raise ValueError("OneJev has no actionable A11Y targets; use visual fallback")
+    candidates, choices = {}, {}
+    for operation, options in targets.items():
+        for index, action in options.items():
+            identifier = operation + "_" + index
+            bounds = parse_bounds(action["bounds"])
+            normalized = [min(1000, max(0, round(n * 1000 / (state["screen"][axis % 2] - 1))))
+                          for axis, n in enumerate(bounds)]
+            choices[identifier] = {"operation": operation, "index": int(index), "label": action["label"],
+                                   "bounds": normalized, **{k: action[k] for k in ("role", "value", "checked") if k in action}}
+            candidates[identifier] = (operation, index, action["id"])
+    for operation, action in controls.items():
+        choices[operation] = action["description"]
+        candidates[operation] = (operation, None, action["id"])
+    for operation, description in (("DONE", "任务全部完成"), ("BLOCKED", "无法继续执行任务")):
+        choices[operation] = description
+        candidates[operation] = (operation, None, operation)
+    if len(choices) > 255:
+        raise ValueError("OneJev supports at most 255 action candidates; use visual fallback")
+    body = {
+        "model": model,
+        "state": {"goal": goal, "page": {k: state.get(k, "") for k in ("app", "activity", "text")},
+                  "screen": "<image:1>",
+                  "recent_actions": [{k: h.get(k) for k in ("action", "kind", "text", "page_changed")}
+                                     for h in history[-10:]]},
+        "questions": {"next_action": {"type": "choice", "criteria": choices,
+                       "instructions": "根据任务、截图和动作候选选择下一步操作及目标。只有全部要求已完成时才选 DONE。"}},
+        "media": [{"type": "image", "data": "data:image/png;base64," + state["screenshot"]}],
+    }
+    started = time.perf_counter()
+    result = post_json(url, "", body, timeout=120)
+    answer = validate_choice(result["answers"].get("next_action", {}), choices)
+    operation, target, choice = candidates[answer["choice"]]
+    operation_probabilities, probabilities, target_probabilities = {}, {}, {}
+    for identifier, probability in answer["probabilities"].items():
+        op, index, action_id = candidates[identifier]
+        operation_probabilities[op] = operation_probabilities.get(op, 0) + probability
+        if op == operation:
+            probabilities[action_id] = probability
+            if index is not None:
+                target_probabilities[index] = probability
+    total = operation_probabilities[operation]
+    if target_probabilities and total:
+        target_probabilities = {index: p / total for index, p in target_probabilities.items()}
+    return {"choice": choice, "operation": operation, "target": target, "confidence": answer["confidence"],
+            "probabilities": probabilities, "operation_probabilities": operation_probabilities,
+            "target_probabilities": target_probabilities,
+            "target_confidence": target_probabilities.get(target),
+            "goal": {"satisfied": None, "probability": None, "confidence": None},
+            "raw_answers": result["answers"], "model": result.get("model", model), "usage": result.get("usage", {}),
+            "latency_ms": round((time.perf_counter() - started) * 1000),
+            "request": {k: v for k, v in body.items() if k != "media"}}
 
 
 def field_context(goal, action, page, history):
